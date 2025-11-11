@@ -8,7 +8,8 @@
 [CmdletBinding()]
 param(
     [ValidateSet('Debug','Release')]
-    [string] $Configuration = 'Release'
+    [string] $Configuration = 'Release',
+    [string] $DistroName
 )
 
 $ErrorActionPreference = 'Stop'
@@ -18,6 +19,8 @@ $serviceBinary = Join-Path $buildDir "${Configuration}\WslShutdownMonitor.exe"
 $reportBinary = Join-Path $buildDir "${Configuration}\master_report.exe"
 $installRoot = 'C:\Program Files\WslMonitor'
 $programDataRoot = 'C:\ProgramData\WslMonitor'
+$secretPath = Join-Path $programDataRoot 'ipc.key'
+$configPath = Join-Path $programDataRoot 'ipc.config'
 
 function Assert-Administrator {
     if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -45,6 +48,49 @@ function Prepare-DataPaths {
     Write-Host "[deploy] Preparing data directory $programDataRoot"
     New-Item -ItemType Directory -Path $programDataRoot -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $programDataRoot 'chain-state') -Force | Out-Null
+    Ensure-IpcSecret
+    $resolvedDistro = Resolve-DistroName -Name $DistroName
+    Ensure-IpcConfig -ResolvedDistro $resolvedDistro
+}
+
+function Ensure-IpcSecret {
+    if (-not (Test-Path $secretPath)) {
+        Write-Host "[deploy] Generating IPC secret at $secretPath"
+        $bytes = New-Object byte[] 32
+        [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+        [IO.File]::WriteAllBytes($secretPath, $bytes)
+    }
+}
+
+function Resolve-DistroName {
+    param([string] $Name)
+    if ($Name -and $Name.Trim().Length -gt 0) {
+        return $Name.Trim()
+    }
+    try {
+        $list = & wsl.exe -l
+        foreach ($line in $list) {
+            if ($line -match '^\s*\*\s*(.+)$') {
+                return $Matches[1].Trim()
+            }
+        }
+        foreach ($line in $list) {
+            if ($line -match '^\s*(.+?)\s*$' -and $line -notmatch '^NAME') {
+                return $Matches[1].Trim()
+            }
+        }
+    } catch {
+    }
+    return 'Ubuntu'
+}
+
+function Ensure-IpcConfig {
+    param([string] $ResolvedDistro)
+    $content = @(
+        "distro=$ResolvedDistro",
+        'socket=/var/run/wsl-monitor/host.sock'
+    )
+    Set-Content -Path $configPath -Value $content -Encoding ASCII
 }
 
 function Register-Service {

@@ -234,13 +234,18 @@ MonitorDaemon::MonitorDaemon()
       buffer_(1024),
       boot_id_(read_trimmed_file("/proc/sys/kernel/random/boot_id")),
       machine_id_(read_trimmed_file("/etc/machine-id")),
-      hostname_(detect_hostname()) {}
+      hostname_(detect_hostname()),
+      bridge_(std::make_unique<IpcBridge>(
+          [this](EventRecord record) { handle_peer_event(std::move(record)); }, "host")) {}
 
 MonitorDaemon::~MonitorDaemon() { Stop(); }
 
 void MonitorDaemon::Run() {
     if (running_.exchange(true)) {
         return;
+    }
+    if (bridge_) {
+        bridge_->Start();
     }
     workers_.emplace_back(&MonitorDaemon::watch_journal, this);
     workers_.emplace_back(&MonitorDaemon::watch_resources, this);
@@ -255,6 +260,9 @@ void MonitorDaemon::Stop() {
     if (!running_.exchange(false)) {
         return;
     }
+    if (bridge_) {
+        bridge_->Stop();
+    }
     for (auto &worker : workers_) {
         if (worker.joinable()) {
             worker.join();
@@ -266,6 +274,24 @@ void MonitorDaemon::Stop() {
 void MonitorDaemon::emit(EventRecord record) {
     record.timestamp = std::chrono::system_clock::now();
     add_common_attributes(record);
+    buffer_.Push(record);
+    logger_.Append(record);
+    if (bridge_) {
+        bridge_->EnqueueGuestEvent(record);
+    }
+}
+
+void MonitorDaemon::handle_peer_event(EventRecord record) {
+    auto ensure_attr = [&record](const std::string &key, const std::string &value) {
+        auto it = std::find_if(record.attributes.begin(), record.attributes.end(),
+                               [&key](const auto &attr) { return attr.key == key; });
+        if (it == record.attributes.end()) {
+            record.attributes.push_back({key, value});
+        } else {
+            it->value = value;
+        }
+    };
+    ensure_attr("peer_origin", "host");
     buffer_.Push(record);
     logger_.Append(record);
 }

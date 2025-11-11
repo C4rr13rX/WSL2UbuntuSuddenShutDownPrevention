@@ -82,6 +82,7 @@ void EventCollector::emit(ShutdownMonitorService &service, EventRecord record) {
     ensure_attr("machine_guid", MachineGuid());
     service.Buffer().Push(record);
     service.Logger().Append(record);
+    service.ForwardToGuest(record);
 }
 
 }  // namespace wslmon::windows

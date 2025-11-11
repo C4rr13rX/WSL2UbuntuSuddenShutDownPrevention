@@ -21,6 +21,7 @@ iteration and the residual items that should be captured on the delivery checkli
 - **Service and crash observability** adds `ServiceHealthCollector`, on-demand `wsl.exe` diagnostics, and WER/live kernel dump sweeps to pinpoint host-side initiators.
 - **Guest resiliency probes** monitor kernel messages, resource/pressure stalls, systemd unit failures, and network error counters to flag in-distro root causes.
 - **Master report generation** merges Windows and Ubuntu evidence with preserved hash-chain anchors for turnkey AI or analyst review.
+- **Mutually authenticated bridge** continuously exchanges host and guest telemetry over HMAC-protected frames so investigators can observe precursors from both environments without waiting for manual log collection.
 
 ## Remaining Enterprise Checklist Items
 

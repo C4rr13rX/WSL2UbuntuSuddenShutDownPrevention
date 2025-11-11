@@ -7,7 +7,8 @@ endif()
 
 add_executable(wsl_monitor
     src/main.cpp
-    src/monitor_daemon.cpp)
+    src/monitor_daemon.cpp
+    src/ipc_bridge.cpp)
 
 target_include_directories(wsl_monitor
     PRIVATE

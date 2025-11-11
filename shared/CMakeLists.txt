@@ -1,6 +1,7 @@
 add_library(shared STATIC
     src/crypto.cpp
     src/event.cpp
+    src/ipc.cpp
     src/logger.cpp)
 
 target_include_directories(shared

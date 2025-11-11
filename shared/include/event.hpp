@@ -24,6 +24,7 @@ struct EventRecord {
 };
 
 std::string SerializeEvent(const EventRecord &record);
+bool DeserializeEvent(std::string_view json, EventRecord &record);
 
 }  // namespace wslmon
 

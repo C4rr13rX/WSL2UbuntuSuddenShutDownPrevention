@@ -14,6 +14,7 @@
 #include "process_collector.hpp"
 #include "security_collector.hpp"
 #include "service_health_collector.hpp"
+#include "ipc_bridge.hpp"
 #include "wer_collector.hpp"
 #include "wsl_diagnostic_collector.hpp"
 
@@ -28,7 +29,8 @@ constexpr wchar_t kServiceName[] = L"WslShutdownMonitor";
 
 ShutdownMonitorService::ShutdownMonitorService()
     : logger_(std::filesystem::path{L"C:/ProgramData/WslMonitor/host-events.log"}, "wslmon.windows"),
-      buffer_(1024) {}
+      buffer_(1024),
+      bridge_(std::make_unique<IpcBridge>(*this)) {}
 
 ShutdownMonitorService::~ShutdownMonitorService() { Stop(); }
 
@@ -63,6 +65,10 @@ void ShutdownMonitorService::Run() {
     collectors_.emplace_back(std::make_unique<WslDiagnosticCollector>());
     collectors_.emplace_back(std::make_unique<WerCollector>());
 
+    if (bridge_) {
+        bridge_->Start();
+    }
+
     worker_ = std::thread(&ShutdownMonitorService::run_collectors, this);
 
     set_status(SERVICE_RUNNING);
@@ -71,6 +77,9 @@ void ShutdownMonitorService::Run() {
 void ShutdownMonitorService::Stop() {
     if (!running_.exchange(false)) {
         return;
+    }
+    if (bridge_) {
+        bridge_->Stop();
     }
     for (auto &collector : collectors_) {
         collector->Stop();
@@ -101,6 +110,12 @@ void ShutdownMonitorService::run_collectors() {
     }
     while (running_.load()) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+}
+
+void ShutdownMonitorService::ForwardToGuest(const EventRecord &record) {
+    if (bridge_) {
+        bridge_->EnqueueHostEvent(record);
     }
 }
 

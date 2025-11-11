@@ -39,6 +39,10 @@ The guest agent is a systemd service (`wsl-monitor`) that focuses on:
 - **Systemd Failure Watcher** — Reports `systemctl --failed` deltas so service-level degradations (journald, networkd, etc.) are visible.
 - **Network Health Watcher** — Flags drops/errors in `/proc/net/dev` counters for virtual interfaces such as `eth0`.
 
+## Cross-Agent Communication
+
+The host service exposes a named pipe (`\\\\.\\pipe\\WslMonitorBridge`) while the guest daemon listens on `/var/run/wsl-monitor/host.sock`. Deployment scripts provision a 32-byte shared secret that both sides load from disk. During connection establishment, the endpoints exchange nonces and validate each other using HMAC-SHA256 proofs before deriving a session key. Every relayed event is framed with that session key, and the receiving agent logs the event locally with an explicit `peer_origin` attribute for provenance.
+
 ## Security Hardening
 
 - Both agents write to dedicated directories with strict ACLs/permissions.
@@ -54,7 +58,6 @@ The guest agent is a systemd service (`wsl-monitor`) that focuses on:
 
 ## Planned Integrations
 
-- Cross-agent communication over a mutually authenticated channel (named pipes on Windows, AF_UNIX sockets on Ubuntu) for near-real-time correlation.
 - Automated remediation hooks (e.g., preemptive memory ballooning or graceful shutdown scripts) once dominant root causes are confirmed.
 - Additional collectors for GPU/driver telemetry and Linux kernel tracing hooks.
 

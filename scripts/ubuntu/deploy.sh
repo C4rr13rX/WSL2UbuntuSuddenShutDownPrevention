@@ -13,6 +13,10 @@ MASTER_REPORT_TARGET="${INSTALL_ROOT}/bin/wsl-master-report"
 SERVICE_UNIT=ubuntu/systemd/wsl-monitor.service
 LOG_DIR=/var/log/wsl-monitor
 CHAIN_STATE_DIR=${CHAIN_STATE_DIR:-/var/lib/wsl-monitor}
+SECRET_TARGET=/etc/wsl-monitor/ipc.key
+SECRET_SOURCE=${SECRET_SOURCE:-/mnt/c/ProgramData/WslMonitor/ipc.key}
+SECRET_DIR=/etc/wsl-monitor
+RUNTIME_DIR=/var/run/wsl-monitor
 
 require_root() {
   if [[ $(id -u) -ne 0 ]]; then
@@ -44,6 +48,29 @@ prepare_directories() {
 
   echo "[deploy] Preparing chain state directory at ${CHAIN_STATE_DIR}"
   install -d -m 0750 -o root -g root "${CHAIN_STATE_DIR}"
+
+  echo "[deploy] Preparing IPC secret directory at ${SECRET_DIR}"
+  install -d -m 0750 -o root -g root "${SECRET_DIR}"
+
+  echo "[deploy] Preparing runtime directory at ${RUNTIME_DIR}"
+  install -d -m 0750 -o root -g root "${RUNTIME_DIR}"
+}
+
+sync_secret() {
+  if [[ -f "${SECRET_SOURCE}" ]]; then
+    echo "[deploy] Syncing IPC secret from Windows host"
+    install -m 0640 -o root -g root "${SECRET_SOURCE}" "${SECRET_TARGET}"
+  else
+    echo "[deploy] Generating new IPC secret"
+    head -c 32 /dev/urandom > "${SECRET_TARGET}.tmp"
+    install -m 0640 -o root -g root "${SECRET_TARGET}.tmp" "${SECRET_TARGET}"
+    rm -f "${SECRET_TARGET}.tmp"
+    if [[ -d "/mnt/c/ProgramData/WslMonitor" ]]; then
+      echo "[deploy] Writing IPC secret to Windows share"
+      cp "${SECRET_TARGET}" "${SECRET_SOURCE}" 2>/dev/null || true
+      chmod 0640 "${SECRET_SOURCE}" 2>/dev/null || true
+    fi
+  fi
 }
 
 install_service() {
@@ -63,6 +90,7 @@ main() {
   build_if_needed
   install_binary
   prepare_directories
+  sync_secret
   install_service
   echo "[deploy] Deployment completed successfully."
 }
