@@ -2,6 +2,7 @@
 
 #include <Evntcons.h>
 #include <wevtapi.h>
+#include <winmeta.h>
 
 #include <string>
 #include <utility>
@@ -16,6 +17,7 @@ namespace wslmon::windows {
 namespace {
 struct ChannelState {
     std::wstring name;
+    std::wstring display_name;
     std::uint64_t last_record_id = 0;
 };
 
@@ -55,6 +57,56 @@ std::string wide_to_utf8(const std::wstring &input) {
     std::string result(size_needed, '\0');
     WideCharToMultiByte(CP_UTF8, 0, input.c_str(), static_cast<int>(input.size()), result.data(), size_needed, nullptr, nullptr);
     return result;
+}
+
+std::uint32_t get_event_id(EVT_HANDLE event) {
+    DWORD buffer_used = 0;
+    EVT_VARIANT value{};
+    if (!EvtGetEventInfo(event, EventId, sizeof(value), &value, &buffer_used)) {
+        return 0;
+    }
+    return value.UInt16Val;
+}
+
+std::uint8_t get_level(EVT_HANDLE event) {
+    DWORD buffer_used = 0;
+    EVT_VARIANT values[EvtSystemPropertyIdEND]{};
+    if (!EvtRender(nullptr, event, EvtRenderEventValues, sizeof(values), values, &buffer_used, nullptr)) {
+        return 0;
+    }
+    return values[EvtSystemLevel].ByteVal;
+}
+
+std::string level_to_severity(std::uint8_t level) {
+    switch (level) {
+        case WINEVENT_LEVEL_CRITICAL:
+            return "Critical";
+        case WINEVENT_LEVEL_ERROR:
+            return "Error";
+        case WINEVENT_LEVEL_WARNING:
+            return "Warning";
+        case WINEVENT_LEVEL_VERBOSE:
+            return "Verbose";
+        case WINEVENT_LEVEL_LOG_ALWAYS:
+        case WINEVENT_LEVEL_INFO:
+        default:
+            return "Info";
+    }
+}
+
+void enrich_attributes(EventRecord &record, const ChannelState &channel, EVT_HANDLE event, std::uint64_t record_id) {
+    record.attributes.push_back({"channel", wide_to_utf8(channel.name)});
+    if (!channel.display_name.empty()) {
+        record.attributes.push_back({"channel_display", wide_to_utf8(channel.display_name)});
+    }
+    record.attributes.push_back({"record_id", std::to_string(record_id)});
+    const auto event_id = get_event_id(event);
+    if (event_id != 0) {
+        record.attributes.push_back({"event_id", std::to_string(event_id)});
+    }
+    const auto level = get_level(event);
+    record.attributes.push_back({"level", std::to_string(level)});
+    record.severity = level_to_severity(level);
 }
 }
 
@@ -96,13 +148,18 @@ void EventLogCollector::Stop() {
 
 void EventLogCollector::poll_logs(ShutdownMonitorService &service) {
     std::vector<ChannelState> channels = {
-        {L"System"},
-        {L"Application"},
-        {L"Microsoft-Windows-Hyper-V-Worker-Admin"},
-        {L"Microsoft-Windows-Hyper-V-Compute-Admin"},
-        {L"Microsoft-Windows-Winlogon/Operational"},
-        {L"Microsoft-Windows-Windows Firewall With Advanced Security/Firewall"},
-        {L"Microsoft-Windows-Windows Defender/Operational"}};
+        {L"System", L"Windows System"},
+        {L"Application", L"Windows Application"},
+        {L"Microsoft-Windows-Hyper-V-Worker-Admin", L"Hyper-V Worker"},
+        {L"Microsoft-Windows-Hyper-V-Compute-Admin", L"Hyper-V Compute"},
+        {L"Microsoft-Windows-Hyper-V-VmSwitch-Operational", L"Hyper-V vSwitch"},
+        {L"Microsoft-Windows-Lxss/Operational", L"WSL Runtime"},
+        {L"Microsoft-Windows-Lxss-Client/Operational", L"WSL Client"},
+        {L"Microsoft-Windows-Subsys-Linux/Operational", L"WSL Subsystem"},
+        {L"Microsoft-Windows-Winlogon/Operational", L"Winlogon"},
+        {L"Microsoft-Windows-Windows Firewall With Advanced Security/Firewall", L"Firewall"},
+        {L"Microsoft-Windows-Windows Defender/Operational", L"Defender"},
+        {L"Microsoft-Windows-WER-SystemErrorReporting/Operational", L"WER System"}};
 
     while (WaitForSingleObject(stop_event_, 1000) == WAIT_TIMEOUT) {
         for (auto &channel : channels) {
@@ -122,10 +179,9 @@ void EventLogCollector::poll_logs(ShutdownMonitorService &service) {
                     channel.last_record_id = record_id;
                     EventRecord record;
                     record.category = "EventLog";
-                    record.severity = "Info";
                     record.message = wide_to_utf8(render_xml(events[i]));
-                    record.attributes.push_back({"channel", wide_to_utf8(channel.name)});
-                    record.attributes.push_back({"record_id", std::to_string(record_id)});
+                    record.sequence = record_id;
+                    enrich_attributes(record, channel, events[i], record_id);
                     emit(service, std::move(record));
                     EvtClose(events[i]);
                 }

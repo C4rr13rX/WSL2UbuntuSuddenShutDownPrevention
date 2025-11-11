@@ -16,6 +16,21 @@ This repository hosts native monitoring agents for Windows 11 hosts and Ubuntu d
 3. **Persist** events in a tamper-resistant rolling store with timestamps synchronized between Windows and Ubuntu.
 4. **Report** correlations immediately after restart to surface probable causes.
 
+## Diagnostic Enhancements
+
+The current iteration introduces ten focused improvements that tighten attribution and elevate the fidelity of failure evidence:
+
+1. **Channel-aware Windows event ingestion** — Hyper-V, WSL runtime, Defender, and WER channels are tailed with native severity derived from event levels so crash IDs and virtualization faults are surfaced immediately.
+2. **Windows service health tracker** — Continuous status telemetry for `LxssManager`, `vmcompute`, `vmms`, and related services records PID churn, exit codes, and restart storms.
+3. **WSL diagnostics snapshots** — Periodic `wsl.exe --status` and `wsl.exe -l -v` captures prove distro state and default version right before an outage.
+4. **Crash artifact sweeps** — Windows Error Reporting queues and live kernel dump directories are monitored for new crash dumps with precise timestamps.
+5. **Process memory pressure alerts** — Working set and commit growth for `vmmem`, `wslhost.exe`, and peers are translated into warning/critical events when resource usage spikes.
+6. **Kernel message tap** — `/dev/kmsg` tailing on Ubuntu pushes panics, OOM traces, and fatal kernel warnings into the forensic log chain.
+7. **Pressure stall analysis** — `/proc/pressure/{memory,cpu}` thresholds raise alerts for sustained contention that typically precedes forced terminations.
+8. **Systemd failure reporting** — `systemctl --failed` deltas reveal unit-level regressions (e.g., journald, networkd) that might cascade into WSL stoppages.
+9. **Network degradation detector** — Interface error/dropped packet counters expose host networking faults and VPN toggles that frequently reset WSL virtual NICs.
+10. **Unified master report** — A cross-platform CLI merges host/guest logs, preserves tamper hashes, and outputs a chronological JSON dossier for downstream analytics.
+
 ## Build Instructions (Overview)
 
 ### Ubuntu Agent
@@ -50,6 +65,20 @@ cmake --build build\windows --config Release
 sc create WslShutdownMonitor binPath= "C:\\Program Files\\WslMonitor\\WslShutdownMonitor.exe" start= auto
 sc start WslShutdownMonitor
 ```
+
+### Master Report Aggregation
+
+After collecting logs on either platform, generate a single forensic package:
+
+```bash
+cmake --build build/ubuntu --target master_report  # or build\windows for MSVC
+./build/ubuntu/master_report \
+  --host-log /mnt/c/ProgramData/WslMonitor/host-events.log \
+  --guest-log /var/log/wsl-monitor/guest-events.log \
+  --output /tmp/wsl-master-report.json
+```
+
+The resulting JSON includes host/guest metadata, final hash-chain anchors, and an event list sorted by timestamp that is ready for downstream AI or investigator review.
 
 ## Security & Forensic Guarantees
 

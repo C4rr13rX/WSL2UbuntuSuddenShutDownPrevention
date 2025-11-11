@@ -12,14 +12,17 @@ add_executable(WslShutdownMonitor
     src/event_log_collector.cpp
     src/power_collector.cpp
     src/process_collector.cpp
-    src/security_collector.cpp)
+    src/security_collector.cpp
+    src/service_health_collector.cpp
+    src/wsl_diagnostic_collector.cpp
+    src/wer_collector.cpp)
 
 target_include_directories(WslShutdownMonitor
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/../shared/include)
 
-target_link_libraries(WslShutdownMonitor PRIVATE shared Wtsapi32.lib PowrProf.lib wbemuuid.lib wevtapi.lib Advapi32.lib)
+target_link_libraries(WslShutdownMonitor PRIVATE shared Wtsapi32.lib PowrProf.lib wbemuuid.lib wevtapi.lib Advapi32.lib Psapi.lib)
 
 target_compile_definitions(WslShutdownMonitor PRIVATE UNICODE _UNICODE)
 

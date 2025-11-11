@@ -11,14 +11,19 @@ This project ships a pair of native telemetry agents that operate independently 
    - Ubuntu: `/var/log/wsl-monitor/guest-events.log`
 4. **Rolling Buffer** — A 1,024-entry circular buffer keeps the most recent events in-memory to support rapid correlation once a cross-environment link is established.
 
+5. **Master Report CLI** — The `master_report` tool ingests both logs, preserves per-line chain hashes, and emits a merged JSON package suitable for ingestion by downstream automation or AI triage.
+
 ## Windows Host Agent
 
 The host agent runs as a Windows service (`WslShutdownMonitor`) and spawns specialized collectors:
 
-- **EventLogCollector** — Monitors key channels including `System`, `Application`, Hyper-V operational logs, Windows Defender, and firewall activity. Each entry is captured as raw XML for precise parsing during analysis.
+- **EventLogCollector** — Monitors `System`, `Application`, Hyper-V operational feeds, Defender, firewall, WSL (`Microsoft-Windows-Lxss*`) and WER channels. Event severity is mapped directly from the Windows event level, ensuring virtualization or crash IDs arrive with proper criticality.
 - **PowerCollector** — Samples AC line state, battery telemetry, and active power scheme to detect lid closures, sleep transitions, or policy enforcements that could terminate WSL instances.
-- **ProcessCollector** — Tracks lifecycle events for `wsl.exe`, `vmmem`, `vmwp.exe`, and related processes to surface unexpected exits or restarts.
+- **ProcessCollector** — Tracks lifecycle events for `wsl.exe`, `wslhost.exe`, `vmmem`, and `vmwp.exe`, emitting warnings when working sets or commit usage surge above configurable thresholds.
 - **SecurityCollector** — Polls Windows Security Center (WMI) for antivirus product status, alerting investigators to security suites that may terminate WSL components.
+- **ServiceHealthCollector** — Watches `LxssManager`, `LxssManagerUser`, `vmcompute`, and `vmms` for PID churn, restarts, and exit codes.
+- **WslDiagnosticCollector** — Periodically executes `wsl.exe --status` and `wsl.exe -l -v` to snapshot distro state, default versions, and engine health.
+- **WerCollector** — Tails Windows Error Reporting queues and `C:\Windows\LiveKernelReports` for new dumps that often accompany abrupt shutdowns.
 
 All collectors feed structured events into the shared logger which performs log rotation at 5 MB.
 
@@ -29,6 +34,10 @@ The guest agent is a systemd service (`wsl-monitor`) that focuses on:
 - **Journal Watcher** — Subscribes to the systemd journal, highlighting kernel transports, systemd services, oomd, and network services for early shutdown signals.
 - **Resource Monitor** — Samples CPU, memory, and root filesystem pressure to detect resource exhaustion scenarios that could kill the distro or individual processes.
 - **Crash Watcher** — Uses inotify to surface new entries under `/var/crash`, ensuring application faults are recorded immediately.
+- **Kernel Message Tap** — Streams `/dev/kmsg` to capture kernel panics, BUG traces, and OOM diagnostics as soon as they are emitted.
+- **Pressure Stall Monitor** — Evaluates `/proc/pressure/{memory,cpu}` for sustained contention that typically precedes SIGKILL or forced shutdowns.
+- **Systemd Failure Watcher** — Reports `systemctl --failed` deltas so service-level degradations (journald, networkd, etc.) are visible.
+- **Network Health Watcher** — Flags drops/errors in `/proc/net/dev` counters for virtual interfaces such as `eth0`.
 
 ## Security Hardening
 
@@ -46,6 +55,6 @@ The guest agent is a systemd service (`wsl-monitor`) that focuses on:
 ## Planned Integrations
 
 - Cross-agent communication over a mutually authenticated channel (named pipes on Windows, AF_UNIX sockets on Ubuntu) for near-real-time correlation.
-- Automated report generator that collates and summarizes the previous 60 seconds of host/guest activity after each restart.
-- Additional collectors for GPU/driver telemetry, Windows Reliability Monitor (WER), and Linux kernel tracing hooks.
+- Automated remediation hooks (e.g., preemptive memory ballooning or graceful shutdown scripts) once dominant root causes are confirmed.
+- Additional collectors for GPU/driver telemetry and Linux kernel tracing hooks.
 

@@ -22,6 +22,10 @@ class MonitorDaemon {
     void watch_journal();
     void watch_resources();
     void watch_crashes();
+    void watch_kmsg();
+    void watch_pressure();
+    void watch_systemd_failures();
+    void watch_network_health();
     void emit(EventRecord record);
     void add_common_attributes(EventRecord &record);
 

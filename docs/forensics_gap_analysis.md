@@ -15,6 +15,13 @@ iteration and the residual items that should be captured on the delivery checkli
 | **Configuration Governance** | Static paths compiled into binaries. | Runtime key ingestion documented and versioned; rotation manifests provide evidence packages for archival workflows. |
 | **Documentation** | High-level architecture overview. | Added forensic readiness brief outlining controls, validation steps, and operational expectations for enterprise responders. |
 
+## New Detection Controls
+
+- **WSL-aware event ingestion** captures Hyper-V, Lxss, and WER diagnostics with native severity mapping so virtualization and crash artifacts are elevated immediately.
+- **Service and crash observability** adds `ServiceHealthCollector`, on-demand `wsl.exe` diagnostics, and WER/live kernel dump sweeps to pinpoint host-side initiators.
+- **Guest resiliency probes** monitor kernel messages, resource/pressure stalls, systemd unit failures, and network error counters to flag in-distro root causes.
+- **Master report generation** merges Windows and Ubuntu evidence with preserved hash-chain anchors for turnkey AI or analyst review.
+
 ## Remaining Enterprise Checklist Items
 
 The following should be scheduled with corporate security engineering to reach full certification:

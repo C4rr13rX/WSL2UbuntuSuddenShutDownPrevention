@@ -9,12 +9,16 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cctype>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <thread>
+#include <unordered_map>
 #include <vector>
+#include <cstdio>
 #include <cerrno>
 
 #include <systemd/sd-journal.h>
@@ -62,6 +66,97 @@ std::string trim_newlines(std::string input) {
         input.pop_back();
     }
     return input;
+}
+
+std::string to_lower_copy(std::string input) {
+    std::transform(input.begin(), input.end(), input.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return input;
+}
+
+bool contains_any_keyword(const std::string &line, const std::vector<std::string> &keywords) {
+    const std::string lowered = to_lower_copy(line);
+    for (const auto &keyword : keywords) {
+        if (lowered.find(keyword) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+struct PressureReading {
+    double avg10 = 0.0;
+    double avg60 = 0.0;
+    double avg300 = 0.0;
+};
+
+bool parse_pressure_file(const std::string &path, PressureReading &some, PressureReading &full) {
+    std::ifstream file(path);
+    if (!file.is_open()) {
+        return false;
+    }
+    std::string line;
+    while (std::getline(file, line)) {
+        std::istringstream iss(line);
+        std::string scope;
+        iss >> scope;
+        std::string token;
+        PressureReading reading;
+        while (iss >> token) {
+            auto pos = token.find('=');
+            if (pos == std::string::npos) {
+                continue;
+            }
+            std::string key = token.substr(0, pos);
+            std::string value = token.substr(pos + 1);
+            try {
+                if (key == "avg10") {
+                    reading.avg10 = std::stod(value);
+                } else if (key == "avg60") {
+                    reading.avg60 = std::stod(value);
+                } else if (key == "avg300") {
+                    reading.avg300 = std::stod(value);
+                }
+            } catch (const std::exception &) {
+                continue;
+            }
+        }
+        if (scope == "some") {
+            some = reading;
+        } else if (scope == "full") {
+            full = reading;
+        }
+    }
+    return true;
+}
+
+struct InterfaceCounters {
+    std::uint64_t rx_bytes = 0;
+    std::uint64_t rx_errors = 0;
+    std::uint64_t rx_dropped = 0;
+    std::uint64_t tx_bytes = 0;
+    std::uint64_t tx_errors = 0;
+    std::uint64_t tx_dropped = 0;
+};
+
+bool parse_interface_line(const std::string &line, std::string &name, InterfaceCounters &counters) {
+    auto colon_pos = line.find(':');
+    if (colon_pos == std::string::npos) {
+        return false;
+    }
+    name = line.substr(0, colon_pos);
+    name.erase(0, name.find_first_not_of(" \t"));
+    name.erase(name.find_last_not_of(" \t") + 1);
+    std::istringstream iss(line.substr(colon_pos + 1));
+    iss >> counters.rx_bytes;  // bytes
+    std::uint64_t rx_packets = 0;
+    iss >> rx_packets >> counters.rx_errors >> counters.rx_dropped;
+    // skip fifo frame compressed multicast
+    std::uint64_t skip = 0;
+    iss >> skip >> skip >> skip >> skip;
+    iss >> counters.tx_bytes;
+    std::uint64_t tx_packets = 0;
+    iss >> tx_packets >> counters.tx_errors >> counters.tx_dropped;
+    return !name.empty();
 }
 
 struct CpuSample {
@@ -150,6 +245,10 @@ void MonitorDaemon::Run() {
     workers_.emplace_back(&MonitorDaemon::watch_journal, this);
     workers_.emplace_back(&MonitorDaemon::watch_resources, this);
     workers_.emplace_back(&MonitorDaemon::watch_crashes, this);
+    workers_.emplace_back(&MonitorDaemon::watch_kmsg, this);
+    workers_.emplace_back(&MonitorDaemon::watch_pressure, this);
+    workers_.emplace_back(&MonitorDaemon::watch_systemd_failures, this);
+    workers_.emplace_back(&MonitorDaemon::watch_network_health, this);
 }
 
 void MonitorDaemon::Stop() {
@@ -319,6 +418,198 @@ void MonitorDaemon::watch_crashes() {
         inotify_rm_watch(fd, wd);
     }
     close(fd);
+}
+
+void MonitorDaemon::watch_kmsg() {
+    int fd = open("/dev/kmsg", O_RDONLY | O_NONBLOCK);
+    if (fd < 0) {
+        EventRecord record;
+        record.source = "kernel.kmsg";
+        record.category = "Kernel";
+        record.severity = "Warning";
+        record.message = "Unable to open /dev/kmsg";
+        record.attributes.push_back({"error", std::to_string(errno)});
+        emit(std::move(record));
+        return;
+    }
+
+    std::vector<char> buffer(4096);
+    while (running_.load()) {
+        ssize_t bytes = read(fd, buffer.data(), buffer.size() - 1);
+        if (bytes > 0) {
+            buffer[bytes] = '\0';
+            std::istringstream iss(buffer.data());
+            std::string line;
+            while (std::getline(iss, line)) {
+                if (line.empty()) {
+                    continue;
+                }
+                std::string trimmed = trim_newlines(line);
+                EventRecord record;
+                record.source = "kernel.kmsg";
+                record.category = "Kernel";
+                record.message = trimmed;
+                if (contains_any_keyword(trimmed, {"panic", "fatal", "bug"})) {
+                    record.severity = "Critical";
+                } else if (contains_any_keyword(trimmed, {"error", "warn", "oom"})) {
+                    record.severity = "Warning";
+                } else {
+                    record.severity = "Info";
+                }
+                emit(std::move(record));
+            }
+        } else if (bytes == 0) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        } else {
+            if (errno != EAGAIN) {
+                EventRecord record;
+                record.source = "kernel.kmsg";
+                record.category = "Kernel";
+                record.severity = "Warning";
+                record.message = "kmsg read failure";
+                record.attributes.push_back({"error", std::to_string(errno)});
+                emit(std::move(record));
+            }
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+        }
+    }
+    close(fd);
+}
+
+void MonitorDaemon::watch_pressure() {
+    PressureReading some{};
+    PressureReading full{};
+    PressureReading last_some{};
+    PressureReading last_full{};
+
+    while (running_.load()) {
+        if (parse_pressure_file("/proc/pressure/memory", some, full)) {
+            if ((some.avg10 > 40.0 && some.avg10 > last_some.avg10 + 5.0) || some.avg60 > 30.0 || full.avg10 > 5.0) {
+                EventRecord record;
+                record.source = "pressure.memory";
+                record.category = "Pressure";
+                record.severity = some.avg10 > 60.0 || full.avg10 > 10.0 ? "Critical" : "Warning";
+                record.message = "Memory pressure elevated";
+                record.attributes.push_back({"some_avg10", std::to_string(some.avg10)});
+                record.attributes.push_back({"some_avg60", std::to_string(some.avg60)});
+                record.attributes.push_back({"full_avg10", std::to_string(full.avg10)});
+                record.attributes.push_back({"full_avg60", std::to_string(full.avg60)});
+                emit(std::move(record));
+            }
+            last_some = some;
+            last_full = full;
+        }
+
+        if (parse_pressure_file("/proc/pressure/cpu", some, full)) {
+            if (some.avg10 > 60.0 || full.avg10 > 20.0) {
+                EventRecord record;
+                record.source = "pressure.cpu";
+                record.category = "Pressure";
+                record.severity = some.avg10 > 80.0 ? "Critical" : "Warning";
+                record.message = "CPU pressure sustained";
+                record.attributes.push_back({"some_avg10", std::to_string(some.avg10)});
+                record.attributes.push_back({"some_avg60", std::to_string(some.avg60)});
+                record.attributes.push_back({"full_avg10", std::to_string(full.avg10)});
+                record.attributes.push_back({"full_avg60", std::to_string(full.avg60)});
+                emit(std::move(record));
+            }
+        }
+
+        std::this_thread::sleep_for(std::chrono::seconds(10));
+    }
+}
+
+void MonitorDaemon::watch_systemd_failures() {
+    std::string last_output;
+    while (running_.load()) {
+        FILE *pipe = popen("systemctl --failed --no-legend --plain 2>/dev/null", "r");
+        if (!pipe) {
+            EventRecord record;
+            record.source = "systemd.failures";
+            record.category = "Systemd";
+            record.severity = "Warning";
+            record.message = "Failed to execute systemctl";
+            record.attributes.push_back({"error", std::to_string(errno)});
+            emit(std::move(record));
+            std::this_thread::sleep_for(std::chrono::seconds(30));
+            continue;
+        }
+        std::string output;
+        char buffer[256];
+        while (fgets(buffer, sizeof(buffer), pipe)) {
+            output += buffer;
+        }
+        int status = pclose(pipe);
+        if (status == 0 && !output.empty() && output != last_output) {
+            EventRecord record;
+            record.source = "systemd.failures";
+            record.category = "Systemd";
+            record.severity = "Warning";
+            record.message = "Systemd units failing";
+            record.attributes.push_back({"units", trim_newlines(output)});
+            emit(std::move(record));
+            last_output = output;
+        } else if (output.empty()) {
+            last_output.clear();
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(30));
+    }
+}
+
+void MonitorDaemon::watch_network_health() {
+    std::unordered_map<std::string, InterfaceCounters> last_state;
+
+    while (running_.load()) {
+        std::ifstream dev("/proc/net/dev");
+        if (!dev.is_open()) {
+            EventRecord record;
+            record.source = "net.dev";
+            record.category = "Network";
+            record.severity = "Warning";
+            record.message = "Cannot open /proc/net/dev";
+            emit(std::move(record));
+            std::this_thread::sleep_for(std::chrono::seconds(15));
+            continue;
+        }
+        std::string line;
+        std::getline(dev, line);
+        std::getline(dev, line);
+        while (std::getline(dev, line)) {
+            std::string name;
+            InterfaceCounters counters;
+            if (!parse_interface_line(line, name, counters)) {
+                continue;
+            }
+            if (name == "lo") {
+                continue;
+            }
+            auto it = last_state.find(name);
+            if (it != last_state.end()) {
+                auto &prev = it->second;
+                auto rx_drop_delta = counters.rx_dropped - prev.rx_dropped;
+                auto tx_drop_delta = counters.tx_dropped - prev.tx_dropped;
+                auto rx_err_delta = counters.rx_errors - prev.rx_errors;
+                auto tx_err_delta = counters.tx_errors - prev.tx_errors;
+                if (rx_drop_delta > 0 || tx_drop_delta > 0 || rx_err_delta > 0 || tx_err_delta > 0) {
+                    EventRecord record;
+                    record.source = "net.dev";
+                    record.category = "Network";
+                    record.severity = (rx_err_delta + tx_err_delta) > 0 ? "Warning" : "Info";
+                    record.message = "Interface error counters increased";
+                    record.attributes.push_back({"interface", name});
+                    record.attributes.push_back({"rx_dropped", std::to_string(rx_drop_delta)});
+                    record.attributes.push_back({"tx_dropped", std::to_string(tx_drop_delta)});
+                    record.attributes.push_back({"rx_errors", std::to_string(rx_err_delta)});
+                    record.attributes.push_back({"tx_errors", std::to_string(tx_err_delta)});
+                    record.attributes.push_back({"rx_bytes", std::to_string(counters.rx_bytes)});
+                    record.attributes.push_back({"tx_bytes", std::to_string(counters.tx_bytes)});
+                    emit(std::move(record));
+                }
+            }
+            last_state[name] = counters;
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(15));
+    }
 }
 
 }  // namespace wslmon::ubuntu

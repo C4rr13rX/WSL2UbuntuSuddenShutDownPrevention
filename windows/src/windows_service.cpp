@@ -13,6 +13,9 @@
 #include "power_collector.hpp"
 #include "process_collector.hpp"
 #include "security_collector.hpp"
+#include "service_health_collector.hpp"
+#include "wer_collector.hpp"
+#include "wsl_diagnostic_collector.hpp"
 
 #pragma comment(lib, "Advapi32.lib")
 #pragma comment(lib, "Wtsapi32.lib")
@@ -56,6 +59,9 @@ void ShutdownMonitorService::Run() {
     collectors_.emplace_back(std::make_unique<PowerCollector>());
     collectors_.emplace_back(std::make_unique<ProcessCollector>());
     collectors_.emplace_back(std::make_unique<SecurityCollector>());
+    collectors_.emplace_back(std::make_unique<ServiceHealthCollector>());
+    collectors_.emplace_back(std::make_unique<WslDiagnosticCollector>());
+    collectors_.emplace_back(std::make_unique<WerCollector>());
 
     worker_ = std::thread(&ShutdownMonitorService::run_collectors, this);
 
