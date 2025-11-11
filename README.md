@@ -31,52 +31,75 @@ The current iteration introduces ten focused improvements that tighten attributi
 9. **Network degradation detector** — Interface error/dropped packet counters expose host networking faults and VPN toggles that frequently reset WSL virtual NICs.
 10. **Unified master report** — A cross-platform CLI merges host/guest logs, preserves tamper hashes, and outputs a chronological JSON dossier for downstream analytics.
 
-## Build Instructions (Overview)
+## End-to-End Automation
 
-### Ubuntu Agent
+Professional deployments rely on reproducible, scripted automation so investigators can rebuild agents, redeploy, and collect evidence without manual tweaks. The `scripts/` directory provides hardened automation for both operating systems. All toolchains are based on open-source projects (CMake, Ninja) or free Microsoft offerings (Visual Studio Build Tools, Windows SDK) so the project can be compiled without commercial licenses.
 
-```bash
-sudo apt install cmake g++ libsystemd-dev
-cmake -S ubuntu -B build/ubuntu
-cmake --build build/ubuntu --config Release
-```
+### Ubuntu (WSL Guest)
 
-Install the service:
+1. **Install prerequisites**
 
-```bash
-sudo cp build/ubuntu/wsl_monitor /usr/local/sbin/wsl-monitor
-sudo cp ubuntu/systemd/wsl-monitor.service /etc/systemd/system/
-sudo systemctl enable --now wsl-monitor
-```
+   ```bash
+   ./scripts/ubuntu/install_dependencies.sh
+   ```
 
-### Windows Agent
+   The installer retries transient APT failures, validates that CMake, Ninja, and GCC are present, and adds the `libsystemd-dev` headers required for journal access.
 
-1. Install **Desktop development with C++** workload in Visual Studio 2022.
-2. Open a `x64 Native Tools Command Prompt` and run:
+2. **Compile**
 
-```bat
-cmake -S windows -B build\windows -G "Visual Studio 17 2022" -A x64
-cmake --build build\windows --config Release
-```
+   ```bash
+   ./scripts/ubuntu/build.sh
+   ```
 
-3. Install the service (from elevated prompt):
+   This generates a Ninja build in `build/ubuntu/` and produces both the `wsl_monitor` daemon and the `master_report` CLI.
 
-```bat
-sc create WslShutdownMonitor binPath= "C:\\Program Files\\WslMonitor\\WslShutdownMonitor.exe" start= auto
-sc start WslShutdownMonitor
-```
+3. **Deploy & enable autostart**
+
+   ```bash
+   sudo ./scripts/ubuntu/deploy.sh
+   ```
+
+   Deployment installs the daemon to `/usr/local/sbin/wsl-monitor`, provisions `/var/log/wsl-monitor` with restrictive permissions, installs the hardened systemd unit, and enables it to launch on boot.
+
+### Windows 11 Host
+
+1. **Install prerequisites (elevated PowerShell)**
+
+   ```powershell
+   Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+   ./scripts/windows/install_dependencies.ps1
+   ```
+
+   The script provisions Visual Studio 2022 Build Tools with the C++ workload, CMake, Ninja, and Git using winget. If winget is unavailable it downloads the Microsoft Build Tools bootstrapper directly.
+
+2. **Compile**
+
+   ```powershell
+   ./scripts/windows/build.ps1
+   ```
+
+   A Visual Studio solution is generated under `build\windows` and built in Release mode.
+
+3. **Deploy & enable autostart (elevated PowerShell)**
+
+   ```powershell
+   ./scripts/windows/deploy.ps1
+   ```
+
+   Deployment copies binaries into `C:\Program Files\WslMonitor`, prepares `C:\ProgramData\WslMonitor` for tamper-evident logs, registers the `WslShutdownMonitor` Windows service under `LocalService`, configures automatic recovery, and starts the service immediately.
 
 ### Master Report Aggregation
 
-After collecting logs on either platform, generate a single forensic package:
+Both build systems emit the cross-platform `master_report` CLI. After telemetry is captured on each side, investigators can consolidate evidence:
 
 ```bash
-cmake --build build/ubuntu --target master_report  # or build\windows for MSVC
-./build/ubuntu/master_report \
+"/usr/local/bin/wsl-master-report" \
   --host-log /mnt/c/ProgramData/WslMonitor/host-events.log \
   --guest-log /var/log/wsl-monitor/guest-events.log \
   --output /tmp/wsl-master-report.json
 ```
+
+On Windows, the same binary is deployed to `C:\Program Files\WslMonitor\master_report.exe` and accepts identical arguments.
 
 The resulting JSON includes host/guest metadata, final hash-chain anchors, and an event list sorted by timestamp that is ready for downstream AI or investigator review.
 
