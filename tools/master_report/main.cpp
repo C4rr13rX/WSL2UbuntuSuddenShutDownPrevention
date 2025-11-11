@@ -11,6 +11,7 @@
 #include <ctime>
 
 #include "event.hpp"
+#include "heuristic_analyzer.hpp"
 
 namespace {
 struct ReportOptions {
@@ -19,74 +20,10 @@ struct ReportOptions {
     std::filesystem::path output_path;
 };
 
-struct ParsedLine {
-    std::string origin;
+struct CollectedEvent {
+    wslmon::TimelineEvent timeline;
     std::string event_json;
-    std::string chain_hash;
-    std::chrono::system_clock::time_point timestamp;
 };
-
-#ifdef _WIN32
-std::chrono::system_clock::time_point parse_timestamp(const std::string &timestamp) {
-    std::tm tm{};
-    std::istringstream ss(timestamp.substr(0, 19));
-    ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
-    if (ss.fail()) {
-        return std::chrono::system_clock::time_point{};
-    }
-    std::time_t t = _mkgmtime(&tm);
-    if (t == static_cast<std::time_t>(-1)) {
-        return std::chrono::system_clock::time_point{};
-    }
-    auto tp = std::chrono::system_clock::from_time_t(t);
-    auto dot_pos = timestamp.find('.');
-    if (dot_pos != std::string::npos && dot_pos + 1 < timestamp.size()) {
-        auto frac = timestamp.substr(dot_pos + 1);
-        if (!frac.empty() && frac.back() == 'Z') {
-            frac.pop_back();
-        }
-        while (frac.size() < 6) {
-            frac.push_back('0');
-        }
-        try {
-            auto micros = std::stoll(frac.substr(0, 6));
-            tp += std::chrono::microseconds(micros);
-        } catch (const std::exception &) {
-        }
-    }
-    return tp;
-}
-#else
-std::chrono::system_clock::time_point parse_timestamp(const std::string &timestamp) {
-    std::tm tm{};
-    std::istringstream ss(timestamp.substr(0, 19));
-    ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
-    if (ss.fail()) {
-        return std::chrono::system_clock::time_point{};
-    }
-    std::time_t t = timegm(&tm);
-    if (t == static_cast<std::time_t>(-1)) {
-        return std::chrono::system_clock::time_point{};
-    }
-    auto tp = std::chrono::system_clock::from_time_t(t);
-    auto dot_pos = timestamp.find('.');
-    if (dot_pos != std::string::npos && dot_pos + 1 < timestamp.size()) {
-        auto frac = timestamp.substr(dot_pos + 1);
-        if (!frac.empty() && frac.back() == 'Z') {
-            frac.pop_back();
-        }
-        while (frac.size() < 6) {
-            frac.push_back('0');
-        }
-        try {
-            auto micros = std::stoll(frac.substr(0, 6));
-            tp += std::chrono::microseconds(micros);
-        } catch (const std::exception &) {
-        }
-    }
-    return tp;
-}
-#endif
 
 std::string now_timestamp() {
     auto now = std::chrono::system_clock::now();
@@ -142,20 +79,7 @@ bool extract_event_json(const std::string &line, std::string &event_json, std::s
     return true;
 }
 
-std::string extract_timestamp_field(const std::string &event_json) {
-    auto ts_pos = event_json.find("\"timestamp\":\"");
-    if (ts_pos == std::string::npos) {
-        return {};
-    }
-    ts_pos += std::string("\"timestamp\":\"").size();
-    auto ts_end = event_json.find('"', ts_pos);
-    if (ts_end == std::string::npos) {
-        return {};
-    }
-    return event_json.substr(ts_pos, ts_end - ts_pos);
-}
-
-bool load_log(const std::filesystem::path &path, const std::string &origin, std::vector<ParsedLine> &events,
+bool load_log(const std::filesystem::path &path, const std::string &origin, std::vector<CollectedEvent> &events,
               std::string &final_chain_hash) {
     std::ifstream in(path);
     if (!in.is_open()) {
@@ -169,9 +93,11 @@ bool load_log(const std::filesystem::path &path, const std::string &origin, std:
             continue;
         }
         final_chain_hash = chain_hash;
-        const auto timestamp_str = extract_timestamp_field(event_json);
-        ParsedLine parsed{origin, event_json, chain_hash, parse_timestamp(timestamp_str)};
-        events.push_back(std::move(parsed));
+        wslmon::EventRecord record;
+        if (!wslmon::DeserializeEvent(event_json, record)) {
+            continue;
+        }
+        events.push_back(CollectedEvent{wslmon::TimelineEvent{origin, std::move(record), chain_hash}, event_json});
     }
     return true;
 }
@@ -208,8 +134,48 @@ ReportOptions parse_arguments(int argc, char **argv) {
     return options;
 }
 
-void write_report(const std::vector<ParsedLine> &events, const ReportOptions &options, const std::string &host_chain,
+std::string format_timestamp(const std::chrono::system_clock::time_point &tp) {
+    if (tp == std::chrono::system_clock::time_point{}) {
+        return "";
+    }
+    auto time_t_value = std::chrono::system_clock::to_time_t(tp);
+    std::tm tm{};
+#ifdef _WIN32
+    gmtime_s(&tm, &time_t_value);
+#else
+    gmtime_r(&time_t_value, &tm);
+#endif
+    auto fractional = std::chrono::duration_cast<std::chrono::microseconds>(tp.time_since_epoch()).count() % 1000000;
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%Y-%m-%dT%H:%M:%S");
+    oss << '.' << std::setw(6) << std::setfill('0') << fractional << 'Z';
+    return oss.str();
+}
+
+void append_metrics(std::ostringstream &oss, const wslmon::ChannelHealthMetrics &metrics) {
+    oss << "{\"total\":" << metrics.total;
+    oss << ",\"info\":" << metrics.info;
+    oss << ",\"warning\":" << metrics.warning;
+    oss << ",\"error\":" << metrics.error;
+    oss << ",\"critical\":" << metrics.critical;
+    if (metrics.total > 0) {
+        oss << ",\"firstTimestamp\":\"" << format_timestamp(metrics.first_timestamp) << "\"";
+        oss << ",\"lastTimestamp\":\"" << format_timestamp(metrics.last_timestamp) << "\"";
+    }
+    oss << '}';
+}
+
+void write_report(const std::vector<CollectedEvent> &events, const ReportOptions &options, const std::string &host_chain,
                   const std::string &guest_chain) {
+    std::vector<wslmon::TimelineEvent> timeline;
+    timeline.reserve(events.size());
+    for (const auto &entry : events) {
+        timeline.push_back(entry.timeline);
+    }
+
+    const auto health = wslmon::ComputeCrossChannelSnapshot(timeline);
+    const auto insights = wslmon::AnalyzeEventTimeline(timeline);
+
     std::ostringstream oss;
     oss << "{\n";
     oss << "  \"generatedAt\": \"" << now_timestamp() << "\",\n";
@@ -217,21 +183,51 @@ void write_report(const std::vector<ParsedLine> &events, const ReportOptions &op
     oss << "    \"logPath\": \"" << options.host_log.string() << "\",\n";
     oss << "    \"finalChainHash\": \"" << host_chain << "\",\n";
     oss << "    \"eventCount\": " << std::count_if(events.begin(), events.end(), [](const auto &e) {
-        return e.origin == "host";
+        return e.timeline.origin == "host";
     }) << "\n";
     oss << "  },\n";
     oss << "  \"guest\": {\n";
     oss << "    \"logPath\": \"" << options.guest_log.string() << "\",\n";
     oss << "    \"finalChainHash\": \"" << guest_chain << "\",\n";
     oss << "    \"eventCount\": " << std::count_if(events.begin(), events.end(), [](const auto &e) {
-        return e.origin == "guest";
+        return e.timeline.origin == "guest";
     }) << "\n";
+    oss << "  },\n";
+    oss << "  \"health\": {\n";
+    oss << "    \"host\": ";
+    append_metrics(oss, health.host);
+    oss << ",\n";
+    oss << "    \"guest\": ";
+    append_metrics(oss, health.guest);
+    oss << "\n  },\n";
+    oss << "  \"analysis\": {\n";
+    oss << "    \"insights\": [\n";
+    for (std::size_t i = 0; i < insights.size(); ++i) {
+        const auto &insight = insights[i];
+        oss << "      {\"id\":\"" << insight.id << "\",\"summary\":\"" << insight.summary
+            << "\",\"rationale\":\"" << insight.rationale << "\",\"confidence\":\"" << insight.confidence
+            << "\",\"supportingEvents\":[";
+        for (std::size_t j = 0; j < insight.supporting_events.size(); ++j) {
+            const auto &support = insight.supporting_events[j];
+            oss << "{\"origin\":\"" << support.origin << "\",\"event\":"
+                << wslmon::SerializeEvent(support.record) << "}";
+            if (j + 1 < insight.supporting_events.size()) {
+                oss << ',';
+            }
+        }
+        oss << "]}";
+        if (i + 1 < insights.size()) {
+            oss << ',';
+        }
+        oss << '\n';
+    }
+    oss << "    ]\n";
     oss << "  },\n";
     oss << "  \"events\": [\n";
     for (std::size_t i = 0; i < events.size(); ++i) {
         const auto &event = events[i];
-        oss << "    {\"origin\":\"" << event.origin << "\",\"chainHash\":\"" << event.chain_hash
-            << "\",\"event\":" << event.event_json << "}";
+        oss << "    {\"origin\":\"" << event.timeline.origin << "\",\"chainHash\":\""
+            << event.timeline.chain_hash << "\",\"event\":" << event.event_json << "}";
         if (i + 1 < events.size()) {
             oss << ',';
         }
@@ -253,7 +249,7 @@ void write_report(const std::vector<ParsedLine> &events, const ReportOptions &op
 int main(int argc, char **argv) {
     ReportOptions options = parse_arguments(argc, argv);
 
-    std::vector<ParsedLine> events;
+    std::vector<CollectedEvent> events;
     events.reserve(4096);
 
     std::string host_chain;
@@ -270,8 +266,8 @@ int main(int argc, char **argv) {
         }
     }
 
-    std::sort(events.begin(), events.end(), [](const ParsedLine &lhs, const ParsedLine &rhs) {
-        return lhs.timestamp < rhs.timestamp;
+    std::sort(events.begin(), events.end(), [](const CollectedEvent &lhs, const CollectedEvent &rhs) {
+        return lhs.timeline.record.timestamp < rhs.timeline.record.timestamp;
     });
 
     write_report(events, options, host_chain, guest_chain);

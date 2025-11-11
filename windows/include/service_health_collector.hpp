@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "event_collector.hpp"
+#include "handle_utils.hpp"
 
 namespace wslmon::windows {
 
@@ -22,8 +23,8 @@ class ServiceHealthCollector : public EventCollector {
     void emit_status(ShutdownMonitorService &service, const std::wstring &service_name,
                      const SERVICE_STATUS_PROCESS &status, const SERVICE_STATUS_PROCESS *last_status);
 
-    HANDLE stop_event_ = nullptr;
-    HANDLE thread_handle_ = nullptr;
+    ScopedHandle stop_event_;
+    ScopedHandle thread_handle_;
     std::vector<std::wstring> services_;
 };
 

@@ -30,6 +30,9 @@ The current iteration introduces ten focused improvements that tighten attributi
 8. **Systemd failure reporting** — `systemctl --failed` deltas reveal unit-level regressions (e.g., journald, networkd) that might cascade into WSL stoppages.
 9. **Network degradation detector** — Interface error/dropped packet counters expose host networking faults and VPN toggles that frequently reset WSL virtual NICs.
 10. **Unified master report** — A cross-platform CLI merges host/guest logs, preserves tamper hashes, and outputs a chronological JSON dossier for downstream analytics.
+11. **Post-restart heuristic analyzer** — After every reboot investigators can run the `master_report` CLI to surface restart bursts, third-party security interventions, memory pressure spikes, and kernel faults with curated supporting evidence.
+12. **Third-party security suite insight** — The Windows service now queries `AntiVirusProduct`, `AntiSpywareProduct`, and `FirewallProduct` WMI providers and correlates the results with vendor-specific services (CrowdStrike, SentinelOne, Symantec, McAfee, and Trend Micro) so quarantines and policy enforcement gaps are visible immediately.
+13. **Cross-channel health snapshot** — The generated report summarizes host/guest event totals by severity, bounding timestamps for each channel so teams can verify telemetry completeness at a glance.
 
 ## End-to-End Automation
 
@@ -103,9 +106,21 @@ On Windows, the same binary is deployed to `C:\Program Files\WslMonitor\master_r
 
 The resulting JSON includes host/guest metadata, final hash-chain anchors, and an event list sorted by timestamp that is ready for downstream AI or investigator review.
 
+When the CLI runs post-restart it also computes a heuristic summary under the `analysis` section. Each insight lists the confidence rating and serializes the supporting events so the team can triage suspicious sequences quickly without manually scanning the raw logs. The sibling `health` section captures per-channel counts and observation windows to verify that telemetry was captured across the entire outage window.
+
 ### Host/Guest Bridge
 
 The Windows service exposes `\\.\pipe\WslMonitorBridge` while the Ubuntu daemon listens on `/var/run/wsl-monitor/host.sock`. Deployment scripts generate or sync a 32-byte secret to `C:\ProgramData\WslMonitor\ipc.key` and `/etc/wsl-monitor/ipc.key`. Each connection performs a nonce/HMAC handshake before exchanging HMAC-authenticated event frames. Relayed records are logged locally with a `peer_origin` attribute so investigators can trace whether evidence originated on the host or in the guest.
+
+## Quality gates
+
+This repository now ships with a lightweight regression test that exercises the heuristic analyzer and cross-channel metrics. Execute the top-level CMake build and invoke `ctest` to confirm that the analyzer surfaces the expected insights:
+
+```bash
+cmake -S . -B build/full
+cmake --build build/full
+ctest --test-dir build/full
+```
 
 ## Security & Forensic Guarantees
 
@@ -115,10 +130,4 @@ The Windows service exposes `\\.\pipe\WslMonitorBridge` while the Ubuntu daemon 
 - Windows and Ubuntu agents exchange telemetry over a mutually authenticated channel that pairs a Windows named pipe with an Ubuntu AF_UNIX socket. A shared secret established during deployment drives nonce-based HMAC handshakes, and every relayed event is wrapped in an authenticated frame before it is logged on the receiving side.
 
 See [`docs/forensics_gap_analysis.md`](docs/forensics_gap_analysis.md) for a detailed comparison between the prototype baseline and the hardened, forensics-ready posture.
-
-## Next Steps
-
-- Add heuristic analyzer that runs post-restart to correlate events.
-- Expand coverage for third-party security suites through vendor-specific APIs.
-- Surface cross-channel health metrics in the master report for rapid validation.
 

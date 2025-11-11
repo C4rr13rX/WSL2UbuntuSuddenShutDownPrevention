@@ -1,6 +1,7 @@
 #pragma once
 
 #include "event_collector.hpp"
+#include "handle_utils.hpp"
 
 namespace wslmon::windows {
 
@@ -13,8 +14,8 @@ class EventLogCollector : public EventCollector {
   private:
     void poll_logs(ShutdownMonitorService &service);
 
-    HANDLE stop_event_ = nullptr;
-    HANDLE thread_handle_ = nullptr;
+    ScopedHandle stop_event_;
+    ScopedHandle thread_handle_;
 };
 
 }  // namespace wslmon::windows

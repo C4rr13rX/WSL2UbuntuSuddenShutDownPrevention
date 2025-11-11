@@ -43,37 +43,44 @@ WerCollector::WerCollector() : EventCollector(L"WerWatcher") {
 }
 
 void WerCollector::Start(ShutdownMonitorService &service) {
-    stop_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    auto *ctx = new std::pair<WerCollector *, ShutdownMonitorService *>(this, &service);
-    thread_handle_ = CreateThread(nullptr, 0, [](LPVOID param) -> DWORD {
+    stop_event_.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    if (!stop_event_) {
+        EventRecord record;
+        record.category = "WER";
+        record.severity = "Error";
+        record.message = "Failed to create stop event for WER collector";
+        emit(service, std::move(record));
+        return;
+    }
+
+    auto ctx = std::make_unique<std::pair<WerCollector *, ShutdownMonitorService *>>(this, &service);
+    HANDLE thread = CreateThread(nullptr, 0, [](LPVOID param) -> DWORD {
         auto *context = static_cast<std::pair<WerCollector *, ShutdownMonitorService *> *>(param);
-        context->first->run(*context->second);
-        delete context;
+        std::unique_ptr<std::pair<WerCollector *, ShutdownMonitorService *>> holder(context);
+        holder->first->run(*holder->second);
         return 0;
-    }, ctx, 0, nullptr);
-    if (!thread_handle_) {
-        delete ctx;
+    }, ctx.get(), 0, nullptr);
+    if (!thread) {
         EventRecord record;
         record.category = "WER";
         record.severity = "Error";
         record.message = "Failed to create WER collector thread";
         emit(service, std::move(record));
+        return;
     }
+    thread_handle_.reset(thread);
+    ctx.release();
 }
 
 void WerCollector::Stop() {
     if (stop_event_) {
-        SetEvent(stop_event_);
+        SetEvent(stop_event_.get());
     }
     if (thread_handle_) {
-        WaitForSingleObject(thread_handle_, INFINITE);
-        CloseHandle(thread_handle_);
-        thread_handle_ = nullptr;
+        WaitForSingleObject(thread_handle_.get(), INFINITE);
     }
-    if (stop_event_) {
-        CloseHandle(stop_event_);
-        stop_event_ = nullptr;
-    }
+    thread_handle_.reset();
+    stop_event_.reset();
 }
 
 void WerCollector::scan_directory(ShutdownMonitorService &service, const std::wstring &path,
@@ -122,7 +129,7 @@ void WerCollector::run(ShutdownMonitorService &service) {
     std::unordered_map<std::wstring, FILETIME> archive_state;
     std::unordered_map<std::wstring, FILETIME> kernel_state;
 
-    while (WaitForSingleObject(stop_event_, 15000) == WAIT_TIMEOUT) {
+    while (WaitForSingleObject(stop_event_.get(), 15000) == WAIT_TIMEOUT) {
         scan_directory(service, directories_[0], queue_state, "WERQueue");
         scan_directory(service, directories_[1], archive_state, "WERArchive");
         scan_directory(service, directories_[2], kernel_state, "KernelDumps");

@@ -3,6 +3,7 @@
 #include <Windows.h>
 
 #include "event_collector.hpp"
+#include "handle_utils.hpp"
 
 namespace wslmon::windows {
 
@@ -18,8 +19,8 @@ class WslDiagnosticCollector : public EventCollector {
     void collect_command(ShutdownMonitorService &service, const wchar_t *command, const char *category,
                          const char *message);
 
-    HANDLE stop_event_ = nullptr;
-    HANDLE thread_handle_ = nullptr;
+    ScopedHandle stop_event_;
+    ScopedHandle thread_handle_;
 };
 
 }  // namespace wslmon::windows

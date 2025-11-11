@@ -50,37 +50,44 @@ ServiceHealthCollector::ServiceHealthCollector() : EventCollector(L"ServiceHealt
 }
 
 void ServiceHealthCollector::Start(ShutdownMonitorService &service) {
-    stop_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    auto *ctx = new std::pair<ServiceHealthCollector *, ShutdownMonitorService *>(this, &service);
-    thread_handle_ = CreateThread(nullptr, 0, [](LPVOID param) -> DWORD {
+    stop_event_.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    if (!stop_event_) {
+        EventRecord record;
+        record.category = "ServiceHealth";
+        record.severity = "Error";
+        record.message = "Failed to create stop event for service health collector";
+        emit(service, std::move(record));
+        return;
+    }
+
+    auto ctx = std::make_unique<std::pair<ServiceHealthCollector *, ShutdownMonitorService *>>(this, &service);
+    HANDLE thread = CreateThread(nullptr, 0, [](LPVOID param) -> DWORD {
         auto *context = static_cast<std::pair<ServiceHealthCollector *, ShutdownMonitorService *> *>(param);
-        context->first->run(*context->second);
-        delete context;
+        std::unique_ptr<std::pair<ServiceHealthCollector *, ShutdownMonitorService *>> holder(context);
+        holder->first->run(*holder->second);
         return 0;
-    }, ctx, 0, nullptr);
-    if (!thread_handle_) {
-        delete ctx;
+    }, ctx.get(), 0, nullptr);
+    if (!thread) {
         EventRecord record;
         record.category = "ServiceHealth";
         record.severity = "Error";
         record.message = "Failed to create service health collector thread";
         emit(service, std::move(record));
+        return;
     }
+    thread_handle_.reset(thread);
+    ctx.release();
 }
 
 void ServiceHealthCollector::Stop() {
     if (stop_event_) {
-        SetEvent(stop_event_);
+        SetEvent(stop_event_.get());
     }
     if (thread_handle_) {
-        WaitForSingleObject(thread_handle_, INFINITE);
-        CloseHandle(thread_handle_);
-        thread_handle_ = nullptr;
+        WaitForSingleObject(thread_handle_.get(), INFINITE);
     }
-    if (stop_event_) {
-        CloseHandle(stop_event_);
-        stop_event_ = nullptr;
-    }
+    thread_handle_.reset();
+    stop_event_.reset();
 }
 
 void ServiceHealthCollector::emit_status(ShutdownMonitorService &service, const std::wstring &service_name,
@@ -110,7 +117,7 @@ void ServiceHealthCollector::emit_status(ShutdownMonitorService &service, const 
 }
 
 void ServiceHealthCollector::run(ShutdownMonitorService &service) {
-    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    ScopedServiceHandle scm(OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT));
     if (!scm) {
         EventRecord record;
         record.category = "ServiceHealth";
@@ -123,9 +130,9 @@ void ServiceHealthCollector::run(ShutdownMonitorService &service) {
 
     std::unordered_map<std::wstring, SERVICE_STATUS_PROCESS> last_states;
 
-    while (WaitForSingleObject(stop_event_, 5000) == WAIT_TIMEOUT) {
+    while (WaitForSingleObject(stop_event_.get(), 5000) == WAIT_TIMEOUT) {
         for (const auto &service_name : services_) {
-            SC_HANDLE svc = OpenServiceW(scm, service_name.c_str(), SERVICE_QUERY_STATUS);
+            ScopedServiceHandle svc(OpenServiceW(scm.get(), service_name.c_str(), SERVICE_QUERY_STATUS));
             if (!svc) {
                 EventRecord record;
                 record.category = "ServiceHealth";
@@ -139,9 +146,8 @@ void ServiceHealthCollector::run(ShutdownMonitorService &service) {
 
             SERVICE_STATUS_PROCESS status{};
             DWORD bytes_needed = 0;
-            if (!QueryServiceStatusEx(svc, SC_STATUS_PROCESS_INFO, reinterpret_cast<LPBYTE>(&status), sizeof(status),
+            if (!QueryServiceStatusEx(svc.get(), SC_STATUS_PROCESS_INFO, reinterpret_cast<LPBYTE>(&status), sizeof(status),
                                       &bytes_needed)) {
-                CloseServiceHandle(svc);
                 EventRecord record;
                 record.category = "ServiceHealth";
                 record.severity = "Warning";
@@ -160,12 +166,8 @@ void ServiceHealthCollector::run(ShutdownMonitorService &service) {
                 emit_status(service, service_name, status, last_ptr);
                 last_states[service_name] = status;
             }
-
-            CloseServiceHandle(svc);
         }
     }
-
-    CloseServiceHandle(scm);
 }
 
 }  // namespace wslmon::windows

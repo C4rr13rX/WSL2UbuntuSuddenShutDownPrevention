@@ -4,6 +4,7 @@
 #include <Windows.h>
 
 #include <cstring>
+#include <memory>
 #include <string>
 #include <utility>
 
@@ -57,37 +58,44 @@ std::string battery_flag_to_string(BYTE flag) {
 PowerCollector::PowerCollector() : EventCollector(L"Power") {}
 
 void PowerCollector::Start(ShutdownMonitorService &service) {
-    stop_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    auto *ctx = new std::pair<PowerCollector *, ShutdownMonitorService *>(this, &service);
-    thread_handle_ = CreateThread(nullptr, 0, [](LPVOID param) -> DWORD {
-        auto *ctx = static_cast<std::pair<PowerCollector *, ShutdownMonitorService *> *>(param);
-        ctx->first->run(*ctx->second);
-        delete ctx;
+    stop_event_.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    if (!stop_event_) {
+        EventRecord record;
+        record.category = "Power";
+        record.severity = "Error";
+        record.message = "Failed to create stop event for power collector";
+        emit(service, std::move(record));
+        return;
+    }
+
+    auto ctx = std::make_unique<std::pair<PowerCollector *, ShutdownMonitorService *>>(this, &service);
+    HANDLE thread = CreateThread(nullptr, 0, [](LPVOID param) -> DWORD {
+        auto *ctx_ptr = static_cast<std::pair<PowerCollector *, ShutdownMonitorService *> *>(param);
+        std::unique_ptr<std::pair<PowerCollector *, ShutdownMonitorService *>> holder(ctx_ptr);
+        holder->first->run(*holder->second);
         return 0;
-    }, ctx, 0, nullptr);
-    if (!thread_handle_) {
-        delete ctx;
+    }, ctx.get(), 0, nullptr);
+    if (!thread) {
         EventRecord record;
         record.category = "Power";
         record.severity = "Error";
         record.message = "Failed to create power collector thread";
         emit(service, std::move(record));
+        return;
     }
+    thread_handle_.reset(thread);
+    ctx.release();
 }
 
 void PowerCollector::Stop() {
     if (stop_event_) {
-        SetEvent(stop_event_);
+        SetEvent(stop_event_.get());
     }
     if (thread_handle_) {
-        WaitForSingleObject(thread_handle_, INFINITE);
-        CloseHandle(thread_handle_);
-        thread_handle_ = nullptr;
+        WaitForSingleObject(thread_handle_.get(), INFINITE);
     }
-    if (stop_event_) {
-        CloseHandle(stop_event_);
-        stop_event_ = nullptr;
-    }
+    thread_handle_.reset();
+    stop_event_.reset();
 }
 
 void PowerCollector::run(ShutdownMonitorService &service) {
@@ -96,7 +104,7 @@ void PowerCollector::run(ShutdownMonitorService &service) {
     ZeroMemory(&last_status, sizeof(last_status));
     bool first = true;
 
-    while (WaitForSingleObject(stop_event_, 5000) == WAIT_TIMEOUT) {
+    while (WaitForSingleObject(stop_event_.get(), 5000) == WAIT_TIMEOUT) {
         if (!GetSystemPowerStatus(&status)) {
             EventRecord record;
             record.category = "Power";

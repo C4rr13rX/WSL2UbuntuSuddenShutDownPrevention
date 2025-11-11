@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cwctype>
+#include <memory>
 #include <set>
 #include <string>
 #include <utility>
@@ -37,49 +38,56 @@ std::string wide_to_utf8(const std::wstring &input) {
 ProcessCollector::ProcessCollector() : EventCollector(L"Process") {}
 
 void ProcessCollector::Start(ShutdownMonitorService &service) {
-    stop_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    auto *ctx = new std::pair<ProcessCollector *, ShutdownMonitorService *>(this, &service);
-    thread_handle_ = CreateThread(nullptr, 0, [](LPVOID param) -> DWORD {
-        auto *ctx = static_cast<std::pair<ProcessCollector *, ShutdownMonitorService *> *>(param);
-        ctx->first->run(*ctx->second);
-        delete ctx;
+    stop_event_.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    if (!stop_event_) {
+        EventRecord record;
+        record.category = "Process";
+        record.severity = "Error";
+        record.message = "Failed to create stop event for process collector";
+        emit(service, std::move(record));
+        return;
+    }
+
+    auto ctx = std::make_unique<std::pair<ProcessCollector *, ShutdownMonitorService *>>(this, &service);
+    HANDLE thread = CreateThread(nullptr, 0, [](LPVOID param) -> DWORD {
+        auto *ctx_ptr = static_cast<std::pair<ProcessCollector *, ShutdownMonitorService *> *>(param);
+        std::unique_ptr<std::pair<ProcessCollector *, ShutdownMonitorService *>> holder(ctx_ptr);
+        holder->first->run(*holder->second);
         return 0;
-    }, ctx, 0, nullptr);
-    if (!thread_handle_) {
-        delete ctx;
+    }, ctx.get(), 0, nullptr);
+    if (!thread) {
         EventRecord record;
         record.category = "Process";
         record.severity = "Error";
         record.message = "Failed to create process collector thread";
         emit(service, std::move(record));
+        return;
     }
+    thread_handle_.reset(thread);
+    ctx.release();
 }
 
 void ProcessCollector::Stop() {
     if (stop_event_) {
-        SetEvent(stop_event_);
+        SetEvent(stop_event_.get());
     }
     if (thread_handle_) {
-        WaitForSingleObject(thread_handle_, INFINITE);
-        CloseHandle(thread_handle_);
-        thread_handle_ = nullptr;
+        WaitForSingleObject(thread_handle_.get(), INFINITE);
     }
-    if (stop_event_) {
-        CloseHandle(stop_event_);
-        stop_event_ = nullptr;
-    }
+    thread_handle_.reset();
+    stop_event_.reset();
 }
 
 void ProcessCollector::run(ShutdownMonitorService &service) {
     std::set<DWORD> last_wsl_pids;
     std::unordered_map<DWORD, std::uint64_t> last_working_sets;
 
-    while (WaitForSingleObject(stop_event_, 3000) == WAIT_TIMEOUT) {
+    while (WaitForSingleObject(stop_event_.get(), 3000) == WAIT_TIMEOUT) {
         MEMORYSTATUSEX mem_status{};
         mem_status.dwLength = sizeof(mem_status);
         GlobalMemoryStatusEx(&mem_status);
-        HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if (snapshot == INVALID_HANDLE_VALUE) {
+        ScopedHandle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
+        if (!snapshot || snapshot.get() == INVALID_HANDLE_VALUE) {
             EventRecord record;
             record.category = "Process";
             record.severity = "Warning";
@@ -92,7 +100,7 @@ void ProcessCollector::run(ShutdownMonitorService &service) {
         entry.dwSize = sizeof(entry);
         std::set<DWORD> current_wsl_pids;
 
-        if (Process32FirstW(snapshot, &entry)) {
+        if (Process32FirstW(snapshot.get(), &entry)) {
             do {
                 std::wstring exe(entry.szExeFile);
                 std::wstring lower = exe;
@@ -111,12 +119,12 @@ void ProcessCollector::run(ShutdownMonitorService &service) {
                         emit(service, std::move(record));
                     }
 
-                    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE,
-                                                 entry.th32ProcessID);
+                    ScopedHandle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE,
+                                                     entry.th32ProcessID));
                     if (process) {
                         PROCESS_MEMORY_COUNTERS_EX counters{};
                         counters.cb = sizeof(counters);
-                        if (GetProcessMemoryInfo(process, reinterpret_cast<PROCESS_MEMORY_COUNTERS *>(&counters),
+                        if (GetProcessMemoryInfo(process.get(), reinterpret_cast<PROCESS_MEMORY_COUNTERS *>(&counters),
                                                  sizeof(counters))) {
                             double working_set_mb = counters.WorkingSetSize / (1024.0 * 1024.0);
                             double commit_mb = counters.PrivateUsage / (1024.0 * 1024.0);
@@ -148,12 +156,10 @@ void ProcessCollector::run(ShutdownMonitorService &service) {
                             }
                             last_working_sets[entry.th32ProcessID] = counters.WorkingSetSize;
                         }
-                        CloseHandle(process);
                     }
                 }
-            } while (Process32NextW(snapshot, &entry));
+            } while (Process32NextW(snapshot.get(), &entry));
         }
-        CloseHandle(snapshot);
 
         for (DWORD pid : last_wsl_pids) {
             if (!current_wsl_pids.count(pid)) {

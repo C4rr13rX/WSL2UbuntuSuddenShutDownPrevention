@@ -4,6 +4,7 @@
 #include <wevtapi.h>
 #include <winmeta.h>
 
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -113,37 +114,45 @@ void enrich_attributes(EventRecord &record, const ChannelState &channel, EVT_HAN
 EventLogCollector::EventLogCollector() : EventCollector(L"EventLog") {}
 
 void EventLogCollector::Start(ShutdownMonitorService &service) {
-    stop_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    auto *ctx = new std::pair<EventLogCollector *, ShutdownMonitorService *>(this, &service);
-    thread_handle_ = CreateThread(nullptr, 0, [](LPVOID param) -> DWORD {
-        auto *ctx = static_cast<std::pair<EventLogCollector *, ShutdownMonitorService *> *>(param);
-        ctx->first->poll_logs(*ctx->second);
-        delete ctx;
+    stop_event_.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    if (!stop_event_) {
+        EventRecord record;
+        record.category = "EventLog";
+        record.severity = "Error";
+        record.message = "Failed to create stop event for event log collector";
+        service.Logger().Append(record);
+        return;
+    }
+
+    auto ctx = std::make_unique<std::pair<EventLogCollector *, ShutdownMonitorService *>>(this, &service);
+    HANDLE thread = CreateThread(nullptr, 0, [](LPVOID param) -> DWORD {
+        auto *ctx_ptr =
+            static_cast<std::pair<EventLogCollector *, ShutdownMonitorService *> *>(param);
+        std::unique_ptr<std::pair<EventLogCollector *, ShutdownMonitorService *>> ctx_holder(ctx_ptr);
+        ctx_holder->first->poll_logs(*ctx_holder->second);
         return 0;
-    }, ctx, 0, nullptr);
-    if (!thread_handle_) {
-        delete ctx;
+    }, ctx.get(), 0, nullptr);
+    if (!thread) {
         EventRecord record;
         record.category = "EventLog";
         record.severity = "Error";
         record.message = "Failed to create event log collector thread";
         service.Logger().Append(record);
+        return;
     }
+    thread_handle_.reset(thread);
+    ctx.release();
 }
 
 void EventLogCollector::Stop() {
     if (stop_event_) {
-        SetEvent(stop_event_);
+        SetEvent(stop_event_.get());
     }
     if (thread_handle_) {
-        WaitForSingleObject(thread_handle_, INFINITE);
-        CloseHandle(thread_handle_);
-        thread_handle_ = nullptr;
+        WaitForSingleObject(thread_handle_.get(), INFINITE);
     }
-    if (stop_event_) {
-        CloseHandle(stop_event_);
-        stop_event_ = nullptr;
-    }
+    thread_handle_.reset();
+    stop_event_.reset();
 }
 
 void EventLogCollector::poll_logs(ShutdownMonitorService &service) {
@@ -161,15 +170,16 @@ void EventLogCollector::poll_logs(ShutdownMonitorService &service) {
         {L"Microsoft-Windows-Windows Defender/Operational", L"Defender"},
         {L"Microsoft-Windows-WER-SystemErrorReporting/Operational", L"WER System"}};
 
-    while (WaitForSingleObject(stop_event_, 1000) == WAIT_TIMEOUT) {
+    while (WaitForSingleObject(stop_event_.get(), 1000) == WAIT_TIMEOUT) {
         for (auto &channel : channels) {
-            EVT_HANDLE query = EvtQuery(nullptr, channel.name.c_str(), L"*", EvtQueryChannelPath | EvtQueryReverseDirection);
+            ScopedEvtHandle query(EvtQuery(nullptr, channel.name.c_str(), L"*",
+                                           EvtQueryChannelPath | EvtQueryReverseDirection));
             if (!query) {
                 continue;
             }
             EVT_HANDLE events[16];
             DWORD returned = 0;
-            while (EvtNext(query, 16, events, 0, 0, &returned)) {
+            while (EvtNext(query.get(), 16, events, 0, 0, &returned)) {
                 for (DWORD i = 0; i < returned; ++i) {
                     std::uint64_t record_id = get_record_id(events[i]);
                     if (record_id == 0 || record_id <= channel.last_record_id) {
@@ -186,7 +196,6 @@ void EventLogCollector::poll_logs(ShutdownMonitorService &service) {
                     EvtClose(events[i]);
                 }
             }
-            EvtClose(query);
         }
     }
 }

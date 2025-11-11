@@ -36,37 +36,44 @@ std::string read_pipe(FILE *pipe) {
 WslDiagnosticCollector::WslDiagnosticCollector() : EventCollector(L"WslDiagnostics") {}
 
 void WslDiagnosticCollector::Start(ShutdownMonitorService &service) {
-    stop_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    auto *ctx = new std::pair<WslDiagnosticCollector *, ShutdownMonitorService *>(this, &service);
-    thread_handle_ = CreateThread(nullptr, 0, [](LPVOID param) -> DWORD {
+    stop_event_.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    if (!stop_event_) {
+        EventRecord record;
+        record.category = "WslDiagnostics";
+        record.severity = "Error";
+        record.message = "Failed to create stop event for WSL diagnostics collector";
+        emit(service, std::move(record));
+        return;
+    }
+
+    auto ctx = std::make_unique<std::pair<WslDiagnosticCollector *, ShutdownMonitorService *>>(this, &service);
+    HANDLE thread = CreateThread(nullptr, 0, [](LPVOID param) -> DWORD {
         auto *context = static_cast<std::pair<WslDiagnosticCollector *, ShutdownMonitorService *> *>(param);
-        context->first->run(*context->second);
-        delete context;
+        std::unique_ptr<std::pair<WslDiagnosticCollector *, ShutdownMonitorService *>> holder(context);
+        holder->first->run(*holder->second);
         return 0;
-    }, ctx, 0, nullptr);
-    if (!thread_handle_) {
-        delete ctx;
+    }, ctx.get(), 0, nullptr);
+    if (!thread) {
         EventRecord record;
         record.category = "WslDiagnostics";
         record.severity = "Error";
         record.message = "Failed to create WSL diagnostics collector thread";
         emit(service, std::move(record));
+        return;
     }
+    thread_handle_.reset(thread);
+    ctx.release();
 }
 
 void WslDiagnosticCollector::Stop() {
     if (stop_event_) {
-        SetEvent(stop_event_);
+        SetEvent(stop_event_.get());
     }
     if (thread_handle_) {
-        WaitForSingleObject(thread_handle_, INFINITE);
-        CloseHandle(thread_handle_);
-        thread_handle_ = nullptr;
+        WaitForSingleObject(thread_handle_.get(), INFINITE);
     }
-    if (stop_event_) {
-        CloseHandle(stop_event_);
-        stop_event_ = nullptr;
-    }
+    thread_handle_.reset();
+    stop_event_.reset();
 }
 
 void WslDiagnosticCollector::collect_command(ShutdownMonitorService &service, const wchar_t *command,
@@ -94,7 +101,7 @@ void WslDiagnosticCollector::collect_command(ShutdownMonitorService &service, co
 }
 
 void WslDiagnosticCollector::run(ShutdownMonitorService &service) {
-    while (WaitForSingleObject(stop_event_, 60000) == WAIT_TIMEOUT) {
+    while (WaitForSingleObject(stop_event_.get(), 60000) == WAIT_TIMEOUT) {
         collect_command(service, L"wsl.exe --status 2>&1", "WslDiagnostics", "WSL status snapshot");
         collect_command(service, L"wsl.exe -l -v 2>&1", "WslDiagnostics", "WSL distributions");
     }

@@ -1,6 +1,7 @@
 add_library(shared STATIC
     src/crypto.cpp
     src/event.cpp
+    src/heuristic_analyzer.cpp
     src/ipc.cpp
     src/logger.cpp)
 

@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "event_collector.hpp"
+#include "handle_utils.hpp"
 
 namespace wslmon::windows {
 
@@ -22,8 +23,8 @@ class WerCollector : public EventCollector {
     void scan_directory(ShutdownMonitorService &service, const std::wstring &path, std::unordered_map<std::wstring, FILETIME> &state,
                         const char *category);
 
-    HANDLE stop_event_ = nullptr;
-    HANDLE thread_handle_ = nullptr;
+    ScopedHandle stop_event_;
+    ScopedHandle thread_handle_;
     std::vector<std::wstring> directories_;
 };
 
