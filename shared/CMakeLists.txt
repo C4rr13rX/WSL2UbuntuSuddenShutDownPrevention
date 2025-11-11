@@ -1,4 +1,5 @@
 add_library(shared STATIC
+    src/crypto.cpp
     src/event.cpp
     src/logger.cpp)
 

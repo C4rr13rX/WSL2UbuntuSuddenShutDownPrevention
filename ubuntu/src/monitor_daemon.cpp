@@ -6,6 +6,8 @@
 #include <sys/statvfs.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -20,6 +22,27 @@
 namespace wslmon::ubuntu {
 
 namespace {
+std::string read_trimmed_file(const std::filesystem::path &path) {
+    std::ifstream file(path);
+    if (!file.is_open()) {
+        return {};
+    }
+    std::string value;
+    std::getline(file, value);
+    while (!value.empty() && (value.back() == '\n' || value.back() == '\r')) {
+        value.pop_back();
+    }
+    return value;
+}
+
+std::string detect_hostname() {
+    std::array<char, 256> buffer{};
+    if (gethostname(buffer.data(), buffer.size()) == 0) {
+        return std::string(buffer.data());
+    }
+    return {};
+}
+
 std::string get_journal_field(sd_journal *journal, const char *field) {
     const void *data = nullptr;
     size_t length = 0;
@@ -112,7 +135,11 @@ void add_journal_matches(sd_journal *journal) {
 }  // namespace
 
 MonitorDaemon::MonitorDaemon()
-    : logger_(std::filesystem::path{"/var/log/wsl-monitor/guest-events.log"}), buffer_(1024) {}
+    : logger_(std::filesystem::path{"/var/log/wsl-monitor/guest-events.log"}, "wslmon.ubuntu"),
+      buffer_(1024),
+      boot_id_(read_trimmed_file("/proc/sys/kernel/random/boot_id")),
+      machine_id_(read_trimmed_file("/etc/machine-id")),
+      hostname_(detect_hostname()) {}
 
 MonitorDaemon::~MonitorDaemon() { Stop(); }
 
@@ -139,14 +166,33 @@ void MonitorDaemon::Stop() {
 
 void MonitorDaemon::emit(EventRecord record) {
     record.timestamp = std::chrono::system_clock::now();
+    add_common_attributes(record);
     buffer_.Push(record);
     logger_.Append(record);
+}
+
+void MonitorDaemon::add_common_attributes(EventRecord &record) {
+    auto ensure_attr = [&record](const std::string &key, const std::string &value) {
+        if (value.empty()) {
+            return;
+        }
+        auto existing = std::find_if(record.attributes.begin(), record.attributes.end(),
+                                      [&key](const auto &attr) { return attr.key == key; });
+        if (existing == record.attributes.end()) {
+            record.attributes.push_back({key, value});
+        }
+    };
+
+    ensure_attr("boot_id", boot_id_);
+    ensure_attr("machine_id", machine_id_);
+    ensure_attr("hostname", hostname_);
 }
 
 void MonitorDaemon::watch_journal() {
     sd_journal *journal = nullptr;
     if (sd_journal_open(&journal, SD_JOURNAL_LOCAL_ONLY) < 0) {
         EventRecord record;
+        record.source = "systemd.journal";
         record.category = "Journal";
         record.severity = "Error";
         record.message = "Failed to open systemd journal";
@@ -164,6 +210,7 @@ void MonitorDaemon::watch_journal() {
         }
         while (sd_journal_next(journal) > 0) {
             EventRecord record;
+            record.source = "systemd.journal";
             record.category = "Journal";
             record.severity = "Info";
             record.message = trim_newlines(get_journal_field(journal, "MESSAGE"));
@@ -180,6 +227,7 @@ void MonitorDaemon::watch_resources() {
     CpuSample prev{};
     if (!read_cpu_sample(prev)) {
         EventRecord record;
+        record.source = "resource.monitor";
         record.category = "Resource";
         record.severity = "Warning";
         record.message = "Unable to read initial CPU sample";
@@ -207,6 +255,7 @@ void MonitorDaemon::watch_resources() {
         }
 
         EventRecord record;
+        record.source = "resource.monitor";
         record.category = "Resource";
         record.severity = "Info";
         record.message = "Resource utilization";
@@ -221,6 +270,7 @@ void MonitorDaemon::watch_crashes() {
     int fd = inotify_init1(IN_NONBLOCK);
     if (fd < 0) {
         EventRecord record;
+        record.source = "inotify.crash";
         record.category = "Crash";
         record.severity = "Error";
         record.message = "Failed to initialize inotify";
@@ -231,6 +281,7 @@ void MonitorDaemon::watch_crashes() {
     int wd = inotify_add_watch(fd, "/var/crash", IN_CREATE | IN_MOVED_TO);
     if (wd < 0) {
         EventRecord record;
+        record.source = "inotify.crash";
         record.category = "Crash";
         record.severity = "Warning";
         record.message = "Cannot watch /var/crash";
@@ -252,6 +303,7 @@ void MonitorDaemon::watch_crashes() {
                     auto *event = reinterpret_cast<inotify_event *>(buffer.data() + offset);
                     if (event->len > 0) {
                         EventRecord record;
+                        record.source = "inotify.crash";
                         record.category = "Crash";
                         record.severity = "Critical";
                         record.message = "Crash dump detected";

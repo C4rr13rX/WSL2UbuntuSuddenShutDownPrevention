@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -22,11 +23,15 @@ class MonitorDaemon {
     void watch_resources();
     void watch_crashes();
     void emit(EventRecord record);
+    void add_common_attributes(EventRecord &record);
 
     std::atomic<bool> running_{false};
     std::vector<std::thread> workers_;
     JsonLogger logger_;
     RingBuffer<EventRecord> buffer_;
+    std::string boot_id_;
+    std::string machine_id_;
+    std::string hostname_;
 };
 
 }  // namespace wslmon::ubuntu

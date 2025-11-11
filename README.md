@@ -51,11 +51,14 @@ sc create WslShutdownMonitor binPath= "C:\\Program Files\\WslMonitor\\WslShutdow
 sc start WslShutdownMonitor
 ```
 
-## Security Considerations
+## Security & Forensic Guarantees
 
-- Agents run with least privileges required to read system telemetry. On Windows, the service runs under `LocalService` with the `SeAuditPrivilege` and `SeSecurityPrivilege` rights to subscribe to security logs. On Ubuntu, the daemon leverages `CAP_DAC_READ_SEARCH` to read `/var/log` entries without full root access.
-- Logs are written in append-only mode with periodic hashing to detect tampering.
+- Agents run with least privileges required to read system telemetry. On Windows, the service runs under `LocalService` with the `SeAuditPrivilege` and `SeSecurityPrivilege` rights to subscribe to security logs. On Ubuntu, the daemon leverages `CAP_DAC_READ_SEARCH` to read `/var/log` entries without full root access and tightens directory ACLs for all evidence paths.
+- Every log entry is wrapped in a tamper-evident envelope. The shared logger maintains a SHA-256 hash chain, persists chain state across restarts, and can optionally add an HMAC-SHA256 signature when `WSLMON_LOG_HMAC_KEY` (hex string) or `WSLMON_LOG_HMAC_KEY_FILE` (path to file containing hex-encoded key material) is provided. Rotated logs emit a JSON manifest recording the final chain hash, rotation timestamp, and entry count.
+- Host identity metadata (hostname, machine/boot IDs) is attached automatically so investigators can prove provenance without out-of-band lookup tables.
 - Communication between host and guest agents will be added via mutually authenticated named pipes/AF_UNIX sockets in a follow-up iteration.
+
+See [`docs/forensics_gap_analysis.md`](docs/forensics_gap_analysis.md) for a detailed comparison between the prototype baseline and the hardened, forensics-ready posture.
 
 ## Next Steps
 

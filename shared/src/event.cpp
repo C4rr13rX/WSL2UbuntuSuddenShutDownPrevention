@@ -1,7 +1,9 @@
 #include "event.hpp"
 
+#include <algorithm>
 #include <iomanip>
 #include <sstream>
+#include <vector>
 
 namespace wslmon {
 namespace {
@@ -65,13 +67,20 @@ std::string SerializeEvent(const EventRecord &record) {
     oss << "\"category\":\"" << escape(record.category) << "\",";
     oss << "\"severity\":\"" << escape(record.severity) << "\",";
     oss << "\"message\":\"" << escape(record.message) << "\",";
+
+    std::vector<EventAttribute> attributes = record.attributes;
+    std::sort(attributes.begin(), attributes.end(), [](const auto &lhs, const auto &rhs) {
+        if (lhs.key == rhs.key) {
+            return lhs.value < rhs.value;
+        }
+        return lhs.key < rhs.key;
+    });
+
     oss << "\"attributes\":[";
-    for (std::size_t i = 0; i < record.attributes.size(); ++i) {
-        const auto &attr = record.attributes[i];
-        oss << '{'
-            << "\"key\":\"" << escape(attr.key) << "\","
-            << "\"value\":\"" << escape(attr.value) << "\"" << '}';
-        if (i + 1 < record.attributes.size()) {
+    for (std::size_t i = 0; i < attributes.size(); ++i) {
+        const auto &attr = attributes[i];
+        oss << "{\"key\":\"" << escape(attr.key) << "\",\"value\":\"" << escape(attr.value) << "\"}";
+        if (i + 1 < attributes.size()) {
             oss << ',';
         }
     }

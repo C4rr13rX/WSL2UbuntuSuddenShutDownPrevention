@@ -36,6 +36,13 @@ The guest agent is a systemd service (`wsl-monitor`) that focuses on:
 - Linux service is sandboxed via systemd hardening directives and capability bounding.
 - Windows service runs under `LocalService` to minimize privilege exposure and only requests rights required for telemetry collection.
 
+## Evidence Integrity Path
+
+- The shared logging layer issues tamper-evident envelopes that combine a rolling SHA-256 hash chain with optional HMAC-SHA256 signatures derived from an operator-supplied key (`WSLMON_LOG_HMAC_KEY` or `WSLMON_LOG_HMAC_KEY_FILE`).
+- Rotation produces sidecar manifests (`*.manifest`) that record the terminal chain hash, event count, and rotation timestamp for downstream chain-of-custody validation.
+- State files (`*.chainstate`) persist the last hash and sequence counter so service restarts resume the chain without gaps.
+- Ubuntu and Windows emitters automatically attach stable host identifiers (boot ID, machine ID/GUID, hostname) to every event to establish provenance.
+
 ## Planned Integrations
 
 - Cross-agent communication over a mutually authenticated channel (named pipes on Windows, AF_UNIX sockets on Ubuntu) for near-real-time correlation.

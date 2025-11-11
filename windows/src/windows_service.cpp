@@ -24,7 +24,7 @@ constexpr wchar_t kServiceName[] = L"WslShutdownMonitor";
 }
 
 ShutdownMonitorService::ShutdownMonitorService()
-    : logger_(std::filesystem::path{L"C:/ProgramData/WslMonitor/host-events.log"}),
+    : logger_(std::filesystem::path{L"C:/ProgramData/WslMonitor/host-events.log"}, "wslmon.windows"),
       buffer_(1024) {}
 
 ShutdownMonitorService::~ShutdownMonitorService() { Stop(); }
