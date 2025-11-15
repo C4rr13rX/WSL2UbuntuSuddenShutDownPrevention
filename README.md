@@ -83,9 +83,10 @@ Professional deployments rely on reproducible, scripted automation so investigat
    ```
 
    The script locates the latest Visual Studio 2022 Build Tools instance via `vswhere.exe`,
-   passes that path to CMake, and stops immediately with actionable guidance if the tools
-   are missing. A Visual Studio solution is generated under `build\windows` and built in
-   Release mode.
+   boots the associated developer environment so MSBuild, the Windows SDK, and compiler
+   paths are available to CMake, and stops immediately with actionable guidance if the
+   tools are missing. A Visual Studio solution is generated under `build\windows` and
+   built in Release mode.
 
 3. **Deploy & enable autostart (elevated PowerShell)**
 
