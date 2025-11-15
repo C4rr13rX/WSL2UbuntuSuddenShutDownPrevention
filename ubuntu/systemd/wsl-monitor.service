@@ -1,0 +1,25 @@
+[Unit]
+Description=WSL Guest Shutdown Telemetry Agent
+After=network.target systemd-journald.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/wsl-monitor
+Restart=always
+RestartSec=3
+User=root
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_SYS_ADMIN CAP_SYS_PTRACE
+AmbientCapabilities=CAP_DAC_READ_SEARCH CAP_SYS_ADMIN CAP_SYS_PTRACE
+NoNewPrivileges=true
+SystemCallFilter=@system-service
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ReadWritePaths=/var/log/wsl-monitor
+
+[Install]
+WantedBy=multi-user.target
+
