@@ -1,0 +1,12 @@
+{
+  "channels": [
+    "System",
+    "Application",
+    "Microsoft-Windows-Hyper-V-Worker-Admin",
+    "Microsoft-Windows-Hyper-V-Compute-Admin",
+    "Microsoft-Windows-Winlogon/Operational",
+    "Microsoft-Windows-Windows Defender/Operational",
+    "Microsoft-Windows-Windows Firewall With Advanced Security/Firewall"
+  ]
+}
+
