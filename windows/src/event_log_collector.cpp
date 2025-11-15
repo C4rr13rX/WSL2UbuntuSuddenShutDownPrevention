@@ -1,8 +1,16 @@
 #include "event_log_collector.hpp"
 
 #include <Evntcons.h>
-#include <wevtapi.h>
-#include <winmeta.h>
+#include <winevt.h>
+
+#ifndef WINEVENT_LEVEL_LOG_ALWAYS
+#define WINEVENT_LEVEL_LOG_ALWAYS 0x0
+#define WINEVENT_LEVEL_CRITICAL 0x1
+#define WINEVENT_LEVEL_ERROR 0x2
+#define WINEVENT_LEVEL_WARNING 0x3
+#define WINEVENT_LEVEL_INFO 0x4
+#define WINEVENT_LEVEL_VERBOSE 0x5
+#endif
 
 #include <memory>
 #include <string>
@@ -41,15 +49,6 @@ std::wstring render_xml(EVT_HANDLE event) {
     return xml;
 }
 
-std::uint64_t get_record_id(EVT_HANDLE event) {
-    DWORD buffer_used = 0;
-    EVT_VARIANT value{};
-    if (!EvtGetEventInfo(event, EventRecordId, sizeof(value), &value, &buffer_used)) {
-        return 0;
-    }
-    return value.UInt64Val;
-}
-
 std::string wide_to_utf8(const std::wstring &input) {
     if (input.empty()) {
         return {};
@@ -60,22 +59,9 @@ std::string wide_to_utf8(const std::wstring &input) {
     return result;
 }
 
-std::uint32_t get_event_id(EVT_HANDLE event) {
+bool render_system_values(EVT_HANDLE event, EVT_VARIANT (&values)[EvtSystemPropertyIdEND]) {
     DWORD buffer_used = 0;
-    EVT_VARIANT value{};
-    if (!EvtGetEventInfo(event, EventId, sizeof(value), &value, &buffer_used)) {
-        return 0;
-    }
-    return value.UInt16Val;
-}
-
-std::uint8_t get_level(EVT_HANDLE event) {
-    DWORD buffer_used = 0;
-    EVT_VARIANT values[EvtSystemPropertyIdEND]{};
-    if (!EvtRender(nullptr, event, EvtRenderEventValues, sizeof(values), values, &buffer_used, nullptr)) {
-        return 0;
-    }
-    return values[EvtSystemLevel].ByteVal;
+    return EvtRender(nullptr, event, EvtRenderEventValues, sizeof(values), values, &buffer_used, nullptr) != 0;
 }
 
 std::string level_to_severity(std::uint8_t level) {
@@ -95,17 +81,20 @@ std::string level_to_severity(std::uint8_t level) {
     }
 }
 
-void enrich_attributes(EventRecord &record, const ChannelState &channel, EVT_HANDLE event, std::uint64_t record_id) {
+void enrich_attributes(EventRecord &record,
+                       const ChannelState &channel,
+                       const EVT_VARIANT (&system_values)[EvtSystemPropertyIdEND],
+                       std::uint64_t record_id) {
     record.attributes.push_back({"channel", wide_to_utf8(channel.name)});
     if (!channel.display_name.empty()) {
         record.attributes.push_back({"channel_display", wide_to_utf8(channel.display_name)});
     }
     record.attributes.push_back({"record_id", std::to_string(record_id)});
-    const auto event_id = get_event_id(event);
+    const auto event_id = static_cast<std::uint32_t>(system_values[EvtSystemEventID].UInt16Val);
     if (event_id != 0) {
         record.attributes.push_back({"event_id", std::to_string(event_id)});
     }
-    const auto level = get_level(event);
+    const auto level = system_values[EvtSystemLevel].ByteVal;
     record.attributes.push_back({"level", std::to_string(level)});
     record.severity = level_to_severity(level);
 }
@@ -181,7 +170,12 @@ void EventLogCollector::poll_logs(ShutdownMonitorService &service) {
             DWORD returned = 0;
             while (EvtNext(query.get(), 16, events, 0, 0, &returned)) {
                 for (DWORD i = 0; i < returned; ++i) {
-                    std::uint64_t record_id = get_record_id(events[i]);
+                    EVT_VARIANT system_values[EvtSystemPropertyIdEND]{};
+                    if (!render_system_values(events[i], system_values)) {
+                        EvtClose(events[i]);
+                        continue;
+                    }
+                    std::uint64_t record_id = system_values[EvtSystemEventRecordId].UInt64Val;
                     if (record_id == 0 || record_id <= channel.last_record_id) {
                         EvtClose(events[i]);
                         continue;
@@ -191,7 +185,7 @@ void EventLogCollector::poll_logs(ShutdownMonitorService &service) {
                     record.category = "EventLog";
                     record.message = wide_to_utf8(render_xml(events[i]));
                     record.sequence = record_id;
-                    enrich_attributes(record, channel, events[i], record_id);
+                    enrich_attributes(record, channel, system_values, record_id);
                     emit(service, std::move(record));
                     EvtClose(events[i]);
                 }

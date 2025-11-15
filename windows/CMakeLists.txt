@@ -23,7 +23,19 @@ target_include_directories(WslShutdownMonitor
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/../shared/include)
 
-target_link_libraries(WslShutdownMonitor PRIVATE shared Wtsapi32.lib PowrProf.lib wbemuuid.lib wevtapi.lib Advapi32.lib Psapi.lib Ws2_32.lib)
+target_link_libraries(WslShutdownMonitor PRIVATE
+    shared
+    Wtsapi32
+    PowrProf
+    wbemuuid
+    wevtapi
+    Advapi32
+    Psapi
+    Ws2_32)
+
+if (MINGW)
+    target_link_options(WslShutdownMonitor PRIVATE -municode)
+endif()
 
 target_compile_definitions(WslShutdownMonitor PRIVATE UNICODE _UNICODE)
 

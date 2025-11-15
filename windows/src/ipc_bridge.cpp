@@ -128,7 +128,8 @@ bool IpcBridge::ensure_program_data() {
 }
 
 bool IpcBridge::load_secret() {
-    std::ifstream in(secret_path_, std::ios::binary);
+    const auto path = std::filesystem::path(secret_path_);
+    std::ifstream in(path, std::ios::binary);
     if (!in.is_open()) {
         return false;
     }
@@ -141,7 +142,8 @@ bool IpcBridge::load_secret() {
 }
 
 bool IpcBridge::load_config() {
-    std::ifstream in(config_path_);
+    const auto path = std::filesystem::path(config_path_);
+    std::ifstream in(path);
     if (!in.is_open()) {
         return false;
     }
@@ -337,7 +339,7 @@ void IpcBridge::unix_worker() {
         }
         std::memcpy(addr.sun_path, unix_path.c_str(), unix_path.size() + 1);
 
-        if (::connect(socket, reinterpret_cast<sockaddr *>(&addr), sizeof(sa_family_t) + static_cast<int>(unix_path.size()) + 1) == SOCKET_ERROR) {
+        if (::connect(socket, reinterpret_cast<sockaddr *>(&addr), sizeof(addr.sun_family) + static_cast<int>(unix_path.size()) + 1) == SOCKET_ERROR) {
             ::closesocket(socket);
             std::this_thread::sleep_for(std::chrono::seconds(3));
             continue;

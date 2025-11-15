@@ -2,6 +2,7 @@
 
 #include <Windows.h>
 #include <Evntcons.h>
+#include <winevt.h>
 #include <Winsvc.h>
 
 namespace wslmon::windows {

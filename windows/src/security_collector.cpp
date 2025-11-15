@@ -75,7 +75,9 @@ struct VendorProbe {
     std::string component;
 };
 
-void emit_vendor_service_state(ShutdownMonitorService &service,
+template <typename EmitFn>
+void emit_vendor_service_state(EmitFn &&emit_fn,
+                               ShutdownMonitorService &service,
                                const VendorProbe &probe,
                                const std::string &vendor_name,
                                const std::string &suite) {
@@ -100,7 +102,7 @@ void emit_vendor_service_state(ShutdownMonitorService &service,
         record.severity = "Warning";
         record.message = "Vendor service unavailable";
         record.attributes.push_back({"error", std::to_string(GetLastError())});
-        emit(service, std::move(record));
+        emit_fn(std::move(record));
         return;
     }
 
@@ -111,7 +113,7 @@ void emit_vendor_service_state(ShutdownMonitorService &service,
         record.severity = "Warning";
         record.message = "Vendor service state query failed";
         record.attributes.push_back({"error", std::to_string(GetLastError())});
-        emit(service, std::move(record));
+        emit_fn(std::move(record));
         return;
     }
 
@@ -119,7 +121,7 @@ void emit_vendor_service_state(ShutdownMonitorService &service,
     record.message = "Vendor service state";
     record.attributes.push_back({"serviceState", service_state_to_text(status.dwCurrentState)});
     record.attributes.push_back({"pid", std::to_string(status.dwProcessId)});
-    emit(service, std::move(record));
+    emit_fn(std::move(record));
 }
 }  // namespace
 
@@ -294,8 +296,9 @@ void SecurityCollector::run(ShutdownMonitorService &service) {
 
             emit(service, std::move(record));
 
+            auto emit_fn = [&](EventRecord evt) { emit(service, std::move(evt)); };
             for (const auto &probe : kVendorProbes) {
-                emit_vendor_service_state(service, probe, vendor_name, suite);
+                emit_vendor_service_state(emit_fn, service, probe, vendor_name, suite);
             }
 
             VariantClear(&display_name);
