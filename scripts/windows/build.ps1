@@ -14,9 +14,9 @@ param(
 $ErrorActionPreference = 'Stop'
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..')
 $buildDir = Join-Path $repoRoot 'build\windows'
-$script:vsInstallPath = $null
+$script:vsInstance = $null
 
-function Get-VsInstallPath {
+function Get-VsInstance {
     $programFilesPaths = @(
         [Environment]::GetEnvironmentVariable('ProgramFiles(x86)'),
         [Environment]::GetEnvironmentVariable('ProgramFiles')
@@ -31,20 +31,43 @@ function Get-VsInstallPath {
     }
 
     foreach ($candidate in $vswhereCandidates) {
-        $installPath = & $candidate -products Microsoft.VisualStudio.Product.BuildTools -latest -requires Microsoft.Component.MSBuild -property installationPath 2>$null
-        if ($LASTEXITCODE -eq 0 -and $installPath) {
-            return $installPath.Trim()
+        $json = & $candidate -products Microsoft.VisualStudio.Product.BuildTools -latest -requires Microsoft.Component.MSBuild -format json 2>$null
+        if ($LASTEXITCODE -ne 0 -or -not $json) {
+            continue
+        }
+
+        try {
+            $instances = $json | ConvertFrom-Json
+        } catch {
+            Write-Warning "Unable to parse vswhere output. $_"
+            continue
+        }
+
+        if (-not $instances) {
+            continue
+        }
+
+        foreach ($instance in $instances) {
+            if (-not $instance.installationPath) { continue }
+            $path = $instance.installationPath.Trim()
+            $version = if ($instance.installationVersion) { $instance.installationVersion.Trim() } else { $null }
+            if ($path) {
+                return [PSCustomObject]@{
+                    InstallationPath    = $path
+                    InstallationVersion = $version
+                }
+            }
         }
     }
 
     throw 'Visual Studio Build Tools installation not detected. Ensure Build Tools 2022 are installed.'
 }
 
-function Ensure-VsInstallPath {
-    if (-not $script:vsInstallPath) {
-        $script:vsInstallPath = Get-VsInstallPath
+function Ensure-VsInstance {
+    if (-not $script:vsInstance) {
+        $script:vsInstance = Get-VsInstance
     }
-    return $script:vsInstallPath
+    return $script:vsInstance
 }
 
 function Invoke-WithVsEnvironment {
@@ -52,7 +75,8 @@ function Invoke-WithVsEnvironment {
         [Parameter(Mandatory)] [string] $CommandLine
     )
 
-    $vsInstallPath = Ensure-VsInstallPath
+    $vsInstance = Ensure-VsInstance
+    $vsInstallPath = $vsInstance.InstallationPath
     $vsDevCmd = Join-Path $vsInstallPath 'Common7\Tools\VsDevCmd.bat'
     if (-not (Test-Path $vsDevCmd)) {
         throw "VsDevCmd.bat not found at $vsDevCmd. Re-run install_dependencies.ps1 to repair the Build Tools installation."
@@ -66,8 +90,23 @@ function Invoke-WithVsEnvironment {
 
 function Invoke-Configure {
     Write-Host "[build] Configuring CMake project..."
-    $vsInstallPath = Ensure-VsInstallPath
-    $configureCommand = "cmake -S `"$repoRoot`" -B `"$buildDir`" -G `"Visual Studio 17 2022`" -A x64 -T host=x64 -DCMAKE_GENERATOR_INSTANCE=`"$vsInstallPath`""
+    $vsInstance = Ensure-VsInstance
+    $vsInstallPath = $vsInstance.InstallationPath
+    $configureArgs = @(
+        'cmake',
+        '-S', "`"$repoRoot`"",
+        '-B', "`"$buildDir`"",
+        '-G', "`"Visual Studio 17 2022`"",
+        '-A', 'x64',
+        '-T', 'host=x64',
+        "-DCMAKE_GENERATOR_INSTANCE=`"$vsInstallPath`""
+    )
+
+    if ($vsInstance.InstallationVersion) {
+        $configureArgs += "-DCMAKE_GENERATOR_INSTANCE_VERSION=`"$vsInstance.InstallationVersion`""
+    }
+
+    $configureCommand = $configureArgs -join ' '
     $exitCode = Invoke-WithVsEnvironment -CommandLine $configureCommand
     if ($exitCode -ne 0) {
         throw "CMake configuration failed with exit code $exitCode."
@@ -111,7 +150,8 @@ function Test-BuildCacheMatch {
     param(
         [Parameter(Mandatory)] [string] $ExpectedGenerator,
         [Parameter()] [string] $ExpectedToolset,
-        [Parameter()] [string] $ExpectedInstance
+        [Parameter()] [string] $ExpectedInstance,
+        [Parameter()] [string] $ExpectedInstanceVersion
     )
 
     $cachePath = Join-Path $buildDir 'CMakeCache.txt'
@@ -158,6 +198,17 @@ function Test-BuildCacheMatch {
         }
     }
 
+    if ($ExpectedInstanceVersion) {
+        if (-not $cacheMap.ContainsKey('CMAKE_GENERATOR_INSTANCE_VERSION')) {
+            return $false
+        }
+
+        $actualVersion = $cacheMap['CMAKE_GENERATOR_INSTANCE_VERSION']
+        if (-not $actualVersion.Equals($ExpectedInstanceVersion, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    }
+
     return $true
 }
 
@@ -169,12 +220,14 @@ if (-not (Test-Path $buildDir)) {
     New-Item -ItemType Directory -Path $buildDir | Out-Null
 }
 
-$vsInstallPath = Ensure-VsInstallPath
+$vsInstance = Ensure-VsInstance
+$vsInstallPath = $vsInstance.InstallationPath
 $expectedGenerator = 'Visual Studio 17 2022'
 $expectedToolset = 'host=x64'
 $expectedInstance = $vsInstallPath
+$expectedInstanceVersion = $vsInstance.InstallationVersion
 
-if (-not (Test-BuildCacheMatch -ExpectedGenerator $expectedGenerator -ExpectedToolset $expectedToolset -ExpectedInstance $expectedInstance)) {
+if (-not (Test-BuildCacheMatch -ExpectedGenerator $expectedGenerator -ExpectedToolset $expectedToolset -ExpectedInstance $expectedInstance -ExpectedInstanceVersion $expectedInstanceVersion)) {
     if (Test-Path $buildDir) {
         Write-Host '[build] Detected generator/toolset mismatch. Regenerating project...'
         Remove-Item $buildDir -Recurse -Force
