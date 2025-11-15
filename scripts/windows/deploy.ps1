@@ -34,18 +34,27 @@ function Resolve-Binary {
         [string] $TargetName
     )
 
-    if (-not (Test-Path $configurationRoot)) {
-        return $null
+    $searchRoots = @()
+    if (Test-Path $configurationRoot) {
+        $searchRoots += $configurationRoot
+    }
+    if (Test-Path $buildDir) {
+        $searchRoots += $buildDir
+    }
+    $searchRoots = $searchRoots | Sort-Object -Unique
+
+    foreach ($root in $searchRoots) {
+        $defaultPath = Join-Path $root ("{0}.exe" -f $TargetName)
+        if (Test-Path $defaultPath) {
+            return (Resolve-Path $defaultPath).Path
+        }
     }
 
-    $defaultPath = Join-Path $configurationRoot ("{0}.exe" -f $TargetName)
-    if (Test-Path $defaultPath) {
-        return $defaultPath
-    }
-
-    $match = Get-ChildItem -Path $configurationRoot -Filter ("{0}.exe" -f $TargetName) -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($match) {
-        return $match.FullName
+    foreach ($root in $searchRoots) {
+        $match = Get-ChildItem -Path $root -Filter ("{0}.exe" -f $TargetName) -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($match) {
+            return $match.FullName
+        }
     }
 
     return $null
@@ -67,7 +76,7 @@ function Ensure-Build {
     }
 
     if (-not $serviceBinaryLocal) {
-        throw "Unable to locate WslShutdownMonitor.exe under $configurationRoot"
+        throw "Unable to locate WslShutdownMonitor.exe in $buildDir. Re-run build.ps1 and check for errors."
     }
 
     $script:serviceBinary = $serviceBinaryLocal
@@ -80,6 +89,40 @@ function Install-Binaries {
     Copy-Item $serviceBinary -Destination (Join-Path $installRoot 'WslShutdownMonitor.exe') -Force
     if (Test-Path $reportBinary) {
         Copy-Item $reportBinary -Destination (Join-Path $installRoot 'master_report.exe') -Force
+    }
+    Copy-RuntimeLibraries
+}
+
+function Get-LlvmRuntimeBinPath {
+    $runtimeRoot = Join-Path $repoRoot 'tools\llvm-mingw'
+    if (-not (Test-Path $runtimeRoot)) {
+        return $null
+    }
+
+    $candidates = Get-ChildItem -Path $runtimeRoot -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending
+    foreach ($candidate in $candidates) {
+        $binPath = Join-Path $candidate.FullName 'bin'
+        if (Test-Path (Join-Path $binPath 'libc++.dll')) {
+            return $binPath
+        }
+    }
+
+    return $null
+}
+
+function Copy-RuntimeLibraries {
+    $runtimeBin = Get-LlvmRuntimeBinPath
+    if (-not $runtimeBin) {
+        Write-Warning '[deploy] LLVM MinGW runtime not found; service binary may miss required DLLs.'
+        return
+    }
+
+    $runtimeDeps = @('libc++.dll', 'libunwind.dll', 'libwinpthread-1.dll')
+    foreach ($dll in $runtimeDeps) {
+        $source = Join-Path $runtimeBin $dll
+        if (Test-Path $source) {
+            Copy-Item $source -Destination (Join-Path $installRoot $dll) -Force
+        }
     }
 }
 
