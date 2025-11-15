@@ -15,6 +15,23 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..')
 $buildDir = Join-Path $repoRoot 'build\windows'
 $script:vsInstance = $null
+$script:activeGenerator = $null
+
+$primaryGeneratorSpec = [PSCustomObject]@{
+    Name             = 'Visual Studio 17 2022'
+    Toolset          = 'host=x64'
+    MultiConfig      = $true
+    RequiresInstance = $true
+    Description      = 'Visual Studio 2022 (MSBuild)'
+}
+
+$fallbackGeneratorSpec = [PSCustomObject]@{
+    Name             = 'Ninja'
+    Toolset          = $null
+    MultiConfig      = $false
+    RequiresInstance = $false
+    Description      = 'Ninja (MSVC toolchain)'
+}
 
 function Get-VsInstance {
     $programFilesPaths = @(
@@ -88,25 +105,68 @@ function Invoke-WithVsEnvironment {
     return $LASTEXITCODE
 }
 
-function Invoke-Configure {
-    Write-Host "[build] Configuring CMake project..."
-    $vsInstance = Ensure-VsInstance
-    $vsInstallPath = $vsInstance.InstallationPath
-    $configureArgs = @(
-        'cmake',
-        '-S', "`"$repoRoot`"",
-        '-B', "`"$buildDir`"",
-        '-G', "`"Visual Studio 17 2022`"",
-        '-A', 'x64',
-        '-T', 'host=x64',
-        "-DCMAKE_GENERATOR_INSTANCE=`"$vsInstallPath`""
+function Join-CommandLine {
+    param(
+        [Parameter(Mandatory)] [string[]] $Args
     )
 
-    if ($vsInstance.InstallationVersion) {
-        $configureArgs += "-DCMAKE_GENERATOR_INSTANCE_VERSION=`"$vsInstance.InstallationVersion`""
+    $escapedArgs = foreach ($arg in $Args) {
+        if ($null -eq $arg -or $arg.Length -eq 0) {
+            "\"\""
+            continue
+        }
+
+        $needsQuotes = $arg -match '[\s"]'
+        $escaped = $arg -replace '(\\*)"', '$1$1"'
+
+        if ($needsQuotes) {
+            $escaped = $escaped -replace '(\\+)$', '$1$1'
+            "\"{0}\"" -f $escaped
+        } else {
+            $escaped
+        }
     }
 
-    $configureCommand = $configureArgs -join ' '
+    return ($escapedArgs -join ' ')
+}
+
+function Invoke-Configure {
+    param(
+        [Parameter(Mandatory)] [pscustomobject] $GeneratorSpec,
+        [Parameter()] [pscustomobject] $VsInstance
+    )
+
+    Write-Host "[build] Configuring CMake project with $($GeneratorSpec.Description)..."
+
+    $configureArgs = @(
+        'cmake',
+        '-S', $repoRoot,
+        '-B', $buildDir,
+        '-G', $GeneratorSpec.Name
+    )
+
+    if ($GeneratorSpec.Name -eq 'Visual Studio 17 2022') {
+        $configureArgs += @('-A', 'x64')
+    }
+
+    if ($GeneratorSpec.Toolset) {
+        $configureArgs += @('-T', $GeneratorSpec.Toolset)
+    }
+
+    if ($GeneratorSpec.RequiresInstance -and $VsInstance) {
+        $vsInstallPath = $VsInstance.InstallationPath
+        $configureArgs += "-DCMAKE_GENERATOR_INSTANCE=$vsInstallPath"
+
+        if ($VsInstance.InstallationVersion) {
+            $configureArgs += "-DCMAKE_GENERATOR_INSTANCE_VERSION=$($VsInstance.InstallationVersion)"
+        }
+    }
+
+    if (-not $GeneratorSpec.MultiConfig) {
+        $configureArgs += "-DCMAKE_BUILD_TYPE=$Configuration"
+    }
+
+    $configureCommand = Join-CommandLine -Args $configureArgs
     $exitCode = Invoke-WithVsEnvironment -CommandLine $configureCommand
     if ($exitCode -ne 0) {
         throw "CMake configuration failed with exit code $exitCode."
@@ -216,32 +276,75 @@ if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
     throw 'cmake not found. Run scripts/windows/install_dependencies.ps1 first.'
 }
 
-if (-not (Test-Path $buildDir)) {
-    New-Item -ItemType Directory -Path $buildDir | Out-Null
-}
+function Prepare-BuildDirectory {
+    param(
+        [Parameter(Mandatory)] [pscustomobject] $GeneratorSpec,
+        [Parameter()] [pscustomobject] $VsInstance
+    )
 
-$vsInstance = Ensure-VsInstance
-$vsInstallPath = $vsInstance.InstallationPath
-$expectedGenerator = 'Visual Studio 17 2022'
-$expectedToolset = 'host=x64'
-$expectedInstance = $vsInstallPath
-$expectedInstanceVersion = $vsInstance.InstallationVersion
+    if (-not (Test-Path $buildDir)) {
+        New-Item -ItemType Directory -Path $buildDir | Out-Null
+        return
+    }
 
-if (-not (Test-BuildCacheMatch -ExpectedGenerator $expectedGenerator -ExpectedToolset $expectedToolset -ExpectedInstance $expectedInstance -ExpectedInstanceVersion $expectedInstanceVersion)) {
-    if (Test-Path $buildDir) {
-        Write-Host '[build] Detected generator/toolset mismatch. Regenerating project...'
+    $expectedGenerator = $GeneratorSpec.Name
+    $expectedToolset = $GeneratorSpec.Toolset
+    $expectedInstance = if ($GeneratorSpec.RequiresInstance -and $VsInstance) { $VsInstance.InstallationPath } else { $null }
+    $expectedInstanceVersion = if ($GeneratorSpec.RequiresInstance -and $VsInstance) { $VsInstance.InstallationVersion } else { $null }
+
+    if (-not (Test-BuildCacheMatch -ExpectedGenerator $expectedGenerator -ExpectedToolset $expectedToolset -ExpectedInstance $expectedInstance -ExpectedInstanceVersion $expectedInstanceVersion)) {
+        Write-Host "[build] Detected generator mismatch for $($GeneratorSpec.Name). Regenerating project..."
         Remove-Item $buildDir -Recurse -Force
         New-Item -ItemType Directory -Path $buildDir | Out-Null
     }
 }
 
-Invoke-Configure
+function Configure-Build {
+    param(
+        [Parameter(Mandatory)] [pscustomobject] $GeneratorSpec,
+        [switch] $AllowFallback
+    )
+
+    $vsInstance = $null
+    if ($GeneratorSpec.RequiresInstance) {
+        $vsInstance = Ensure-VsInstance
+    }
+
+    Prepare-BuildDirectory -GeneratorSpec $GeneratorSpec -VsInstance $vsInstance
+
+    try {
+        Invoke-Configure -GeneratorSpec $GeneratorSpec -VsInstance $vsInstance
+        $script:activeGenerator = $GeneratorSpec
+    } catch {
+        if ($AllowFallback) {
+            Write-Warning "Primary generator failed: $($_.Exception.Message). Attempting Ninja fallback."
+            Prepare-BuildDirectory -GeneratorSpec $fallbackGeneratorSpec -VsInstance $vsInstance
+            Invoke-Configure -GeneratorSpec $fallbackGeneratorSpec -VsInstance $vsInstance
+            $script:activeGenerator = $fallbackGeneratorSpec
+        } else {
+            throw
+        }
+    }
+}
+
+Configure-Build -GeneratorSpec $primaryGeneratorSpec -AllowFallback
+
+if (-not $script:activeGenerator) {
+    throw 'Unable to configure any generator. Check Visual Studio Build Tools installation.'
+}
 
 Write-Host "[build] Building configuration $Configuration"
-$buildCommand = "cmake --build `"$buildDir`" --config $Configuration"
+
+if ($script:activeGenerator.MultiConfig) {
+    $buildArgs = @('cmake', '--build', $buildDir, '--config', $Configuration)
+} else {
+    $buildArgs = @('cmake', '--build', $buildDir)
+}
+
+$buildCommand = Join-CommandLine -Args $buildArgs
 $buildExitCode = Invoke-WithVsEnvironment -CommandLine $buildCommand
 if ($buildExitCode -ne 0) {
     throw "CMake build failed with exit code $buildExitCode."
 }
 
-Write-Host '[build] Build completed successfully.'
+Write-Host "[build] Build completed successfully using $($script:activeGenerator.Name)."

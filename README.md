@@ -83,11 +83,13 @@ Professional deployments rely on reproducible, scripted automation so investigat
    ```
 
    The script locates the latest Visual Studio 2022 Build Tools instance via `vswhere.exe`,
-   supplies both the installation path and version to CMake to avoid "instance not known"
-   generator errors, boots the associated developer environment so MSBuild, the Windows
-   SDK, and compiler paths are available to CMake, and stops immediately with actionable
-   guidance if the tools are missing. A Visual Studio solution is generated under
-   `build\windows` and built in Release mode.
+   primes the developer command prompt so MSBuild, the Windows SDK, and compiler paths are
+   available, and then attempts to configure the CMake project with the Visual Studio
+   generator. If the generator refuses to recognize the detected instance, the helper
+   automatically cleans the build tree and falls back to the Ninja generator while keeping
+   the MSVC toolchain active. The final build directory (`build\windows`) therefore always
+   contains either the Visual Studio solution or the Ninja build graph compiled in Release
+   mode, and failures surface immediately with actionable guidance.
 
 3. **Deploy & enable autostart (elevated PowerShell)**
 
