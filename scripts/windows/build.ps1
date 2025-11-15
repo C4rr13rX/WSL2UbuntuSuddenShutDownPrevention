@@ -59,7 +59,8 @@ function Invoke-WithVsEnvironment {
     }
 
     $comspec = if ($env:COMSPEC) { $env:COMSPEC } else { 'cmd.exe' }
-    & $comspec /c "`"$vsDevCmd`" -no_logo -arch=x64 && $CommandLine"
+    $batchInvocation = "call `"$vsDevCmd`" -no_logo -arch=x64 && $CommandLine"
+    & $comspec /c "$batchInvocation"
     return $LASTEXITCODE
 }
 
@@ -106,8 +107,9 @@ if (-not (Test-GeneratorMatch)) {
     } else {
         New-Item -ItemType Directory -Path $buildDir | Out-Null
     }
-    Invoke-Configure
 }
+
+Invoke-Configure
 
 Write-Host "[build] Building configuration $Configuration"
 $buildCommand = "cmake --build `"$buildDir`" --config $Configuration"
