@@ -112,7 +112,7 @@ function Join-CommandLine {
 
     $escapedArgs = foreach ($arg in $Args) {
         if ($null -eq $arg -or $arg.Length -eq 0) {
-            "\"\""
+            '""'
             continue
         }
 
