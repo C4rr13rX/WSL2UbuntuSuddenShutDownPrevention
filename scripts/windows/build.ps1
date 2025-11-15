@@ -74,21 +74,91 @@ function Invoke-Configure {
     }
 }
 
-function Test-GeneratorMatch {
+function Get-NormalizedPath {
+    param(
+        [Parameter(Mandatory)] [string] $Path
+    )
+
+    try {
+        return (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
+    } catch {
+        return $Path
+    }
+}
+
+function Get-CMakeCacheMap {
+    param(
+        [Parameter(Mandatory)] [string] $CachePath
+    )
+
+    $result = @{}
+    $content = Get-Content $CachePath -ErrorAction Stop
+    foreach ($line in $content) {
+        if ($line.StartsWith('#')) { continue }
+        $equalsIndex = $line.IndexOf('=')
+        if ($equalsIndex -lt 0) { continue }
+        $keyPart = $line.Substring(0, $equalsIndex)
+        $value = $line.Substring($equalsIndex + 1)
+        $colonIndex = $keyPart.IndexOf(':')
+        if ($colonIndex -lt 0) { continue }
+        $key = $keyPart.Substring(0, $colonIndex)
+        $result[$key] = $value
+    }
+    return $result
+}
+
+function Test-BuildCacheMatch {
+    param(
+        [Parameter(Mandatory)] [string] $ExpectedGenerator,
+        [Parameter()] [string] $ExpectedToolset,
+        [Parameter()] [string] $ExpectedInstance
+    )
+
     $cachePath = Join-Path $buildDir 'CMakeCache.txt'
     if (-not (Test-Path $cachePath)) {
         return $false
     }
 
     try {
-        $cacheContent = Get-Content $cachePath -ErrorAction Stop
+        $cacheMap = Get-CMakeCacheMap -CachePath $cachePath
     } catch {
-        Write-Warning "Unable to read $cachePath. Regenerating project. $_"
+        Write-Warning "Unable to parse $cachePath. Regenerating project. $_"
         return $false
     }
 
-    $match = $cacheContent | Select-String -SimpleMatch 'CMAKE_GENERATOR:INTERNAL=Visual Studio 17 2022'
-    return $null -ne $match
+    if (-not $cacheMap.ContainsKey('CMAKE_GENERATOR')) {
+        return $false
+    }
+
+    if ($cacheMap['CMAKE_GENERATOR'] -ne $ExpectedGenerator) {
+        return $false
+    }
+
+    if ($ExpectedToolset) {
+        if (-not $cacheMap.ContainsKey('CMAKE_GENERATOR_TOOLSET')) {
+            return $false
+        }
+
+        $toolset = $cacheMap['CMAKE_GENERATOR_TOOLSET']
+        if (-not $toolset.Equals($ExpectedToolset, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    }
+
+    if ($ExpectedInstance) {
+        if (-not $cacheMap.ContainsKey('CMAKE_GENERATOR_INSTANCE')) {
+            return $false
+        }
+
+        $actualInstance = Get-NormalizedPath -Path $cacheMap['CMAKE_GENERATOR_INSTANCE']
+        $desiredInstance = Get-NormalizedPath -Path $ExpectedInstance
+
+        if (-not $actualInstance.Equals($desiredInstance, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    }
+
+    return $true
 }
 
 if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
@@ -99,12 +169,15 @@ if (-not (Test-Path $buildDir)) {
     New-Item -ItemType Directory -Path $buildDir | Out-Null
 }
 
-if (-not (Test-GeneratorMatch)) {
+$vsInstallPath = Ensure-VsInstallPath
+$expectedGenerator = 'Visual Studio 17 2022'
+$expectedToolset = 'host=x64'
+$expectedInstance = $vsInstallPath
+
+if (-not (Test-BuildCacheMatch -ExpectedGenerator $expectedGenerator -ExpectedToolset $expectedToolset -ExpectedInstance $expectedInstance)) {
     if (Test-Path $buildDir) {
-        Write-Host '[build] Regenerating project with Visual Studio 17 2022 generator...'
+        Write-Host '[build] Detected generator/toolset mismatch. Regenerating project...'
         Remove-Item $buildDir -Recurse -Force
-        New-Item -ItemType Directory -Path $buildDir | Out-Null
-    } else {
         New-Item -ItemType Directory -Path $buildDir | Out-Null
     }
 }
