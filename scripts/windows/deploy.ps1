@@ -15,8 +15,9 @@ param(
 $ErrorActionPreference = 'Stop'
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..')
 $buildDir = Join-Path $repoRoot 'build\windows'
-$serviceBinary = Join-Path $buildDir "${Configuration}\WslShutdownMonitor.exe"
-$reportBinary = Join-Path $buildDir "${Configuration}\master_report.exe"
+$configurationRoot = Join-Path $buildDir $Configuration
+$serviceBinary = $null
+$reportBinary = $null
 $installRoot = 'C:\Program Files\WslMonitor'
 $programDataRoot = 'C:\ProgramData\WslMonitor'
 $secretPath = Join-Path $programDataRoot 'ipc.key'
@@ -28,11 +29,49 @@ function Assert-Administrator {
     }
 }
 
+function Resolve-Binary {
+    param(
+        [string] $TargetName
+    )
+
+    if (-not (Test-Path $configurationRoot)) {
+        return $null
+    }
+
+    $defaultPath = Join-Path $configurationRoot ("{0}.exe" -f $TargetName)
+    if (Test-Path $defaultPath) {
+        return $defaultPath
+    }
+
+    $match = Get-ChildItem -Path $configurationRoot -Filter ("{0}.exe" -f $TargetName) -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($match) {
+        return $match.FullName
+    }
+
+    return $null
+}
+
 function Ensure-Build {
-    if (-not (Test-Path $serviceBinary)) {
-        Write-Host '[deploy] Compiled binaries not found. Triggering build...'
+    if (-not (Test-Path (Join-Path $buildDir 'CMakeCache.txt'))) {
         & (Join-Path $PSScriptRoot 'build.ps1') -Configuration $Configuration
     }
+
+    $serviceBinaryLocal = Resolve-Binary -TargetName 'WslShutdownMonitor'
+    $reportBinaryLocal = Resolve-Binary -TargetName 'master_report'
+
+    if (-not $serviceBinaryLocal) {
+        Write-Host '[deploy] Compiled binaries not found. Triggering build...'
+        & (Join-Path $PSScriptRoot 'build.ps1') -Configuration $Configuration
+        $serviceBinaryLocal = Resolve-Binary -TargetName 'WslShutdownMonitor'
+        $reportBinaryLocal = Resolve-Binary -TargetName 'master_report'
+    }
+
+    if (-not $serviceBinaryLocal) {
+        throw "Unable to locate WslShutdownMonitor.exe under $configurationRoot"
+    }
+
+    $script:serviceBinary = $serviceBinaryLocal
+    $script:reportBinary = $reportBinaryLocal
 }
 
 function Install-Binaries {

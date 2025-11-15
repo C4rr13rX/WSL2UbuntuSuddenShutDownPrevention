@@ -54,7 +54,8 @@ Professional deployments rely on reproducible, scripted automation so investigat
    ./scripts/ubuntu/build.sh
    ```
 
-   This generates a Ninja build in `build/ubuntu/` and produces both the `wsl_monitor` daemon and the `master_report` CLI.
+   This generates a Ninja build in `build/ubuntu/` and produces both the guest daemon at `build/ubuntu/ubuntu/wsl_monitor`
+   and the cross-platform CLI at `build/ubuntu/tools/master_report/master_report`.
 
 3. **Deploy & enable autostart**
 
@@ -62,7 +63,7 @@ Professional deployments rely on reproducible, scripted automation so investigat
    sudo ./scripts/ubuntu/deploy.sh
    ```
 
-   Deployment installs the daemon to `/usr/local/sbin/wsl-monitor`, provisions `/var/log/wsl-monitor` with restrictive permissions, installs the hardened systemd unit, and enables it to launch on boot.
+   Deployment installs the daemon to `/usr/local/sbin/wsl-monitor`, provisions `/var/log/wsl-monitor` with restrictive permissions, installs the hardened systemd unit, and enables it to launch on boot when systemd is active. If systemd is disabled (common on older WSL releases), the script leaves clear follow-up instructions for starting the daemon manually.
 
 ### Windows 11 Host
 

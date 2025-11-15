@@ -7,6 +7,8 @@ set -euo pipefail
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 BUILD_DIR=${BUILD_DIR:-"${REPO_ROOT}/build/ubuntu"}
+AGENT_BINARY="${BUILD_DIR}/ubuntu/wsl_monitor"
+MASTER_REPORT_BINARY="${BUILD_DIR}/tools/master_report/master_report"
 INSTALL_ROOT=${INSTALL_ROOT:-/usr/local}
 BIN_DIR="${INSTALL_ROOT}/sbin"
 MASTER_REPORT_TARGET="${INSTALL_ROOT}/bin/wsl-master-report"
@@ -26,7 +28,7 @@ require_root() {
 }
 
 build_if_needed() {
-  if [[ ! -x "${BUILD_DIR}/wsl_monitor" ]]; then
+  if [[ ! -x "${AGENT_BINARY}" ]]; then
     echo "[deploy] Compiled binaries not found. Triggering build..."
     BUILD_DIR="${BUILD_DIR}" BUILD_TYPE=${BUILD_TYPE:-Release} "${REPO_ROOT}/scripts/ubuntu/build.sh"
   fi
@@ -34,11 +36,16 @@ build_if_needed() {
 
 install_binary() {
   echo "[deploy] Installing guest agent to ${BIN_DIR}/wsl-monitor"
-  install -D -m 0750 "${BUILD_DIR}/wsl_monitor" "${BIN_DIR}/wsl-monitor"
+  if [[ ! -x "${AGENT_BINARY}" ]]; then
+    echo "[deploy] Guest agent binary missing after build. Expected at ${AGENT_BINARY}." >&2
+    exit 1
+  fi
 
-  if [[ -x "${BUILD_DIR}/master_report" ]]; then
+  install -D -m 0750 "${AGENT_BINARY}" "${BIN_DIR}/wsl-monitor"
+
+  if [[ -x "${MASTER_REPORT_BINARY}" ]]; then
     echo "[deploy] Installing master_report CLI to ${MASTER_REPORT_TARGET}"
-    install -D -m 0755 "${BUILD_DIR}/master_report" "${MASTER_REPORT_TARGET}"
+    install -D -m 0755 "${MASTER_REPORT_BINARY}" "${MASTER_REPORT_TARGET}"
   fi
 }
 
@@ -78,11 +85,21 @@ install_service() {
   install -D -m 0644 "${REPO_ROOT}/${SERVICE_UNIT}" \
     "/etc/systemd/system/wsl-monitor.service"
 
-  echo "[deploy] Reloading systemd daemon"
-  systemctl daemon-reload
+  if command -v systemctl >/dev/null && [[ -d /run/systemd/system ]]; then
+    echo "[deploy] Reloading systemd daemon"
+    systemctl daemon-reload
 
-  echo "[deploy] Enabling and starting wsl-monitor.service"
-  systemctl enable --now wsl-monitor.service
+    echo "[deploy] Enabling and starting wsl-monitor.service"
+    systemctl enable --now wsl-monitor.service
+  else
+    cat <<'EOF'
+[deploy] systemd is not active in this environment. The unit file has been installed
+[deploy] but was not enabled automatically. To launch the agent manually, execute:
+[deploy]   sudo /usr/local/sbin/wsl-monitor
+[deploy] Once systemd is available, run:
+[deploy]   sudo systemctl enable --now wsl-monitor.service
+EOF
+  fi
 }
 
 main() {
